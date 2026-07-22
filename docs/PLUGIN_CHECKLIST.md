@@ -260,10 +260,10 @@ and runs gates 1 through 12 in full.
 
 ## 2. Repository
 
-Gate 2 partially complete `2026-07-21`. Local repository initialized on `main` with one commit,
-`57b8f3f`, authored `Carmelo Santana <me@carmelosantana.com>`. Ten files tracked; `target/` ignored.
+Gate 2 complete `2026-07-21`. Local repository initialized on `main`; ten files tracked, `target/`
+ignored; commits `57b8f3f` and `1df4e6c`, authored `Carmelo Santana <me@carmelosantana.com>`.
 
-- [ ] Repository is `carmelosantana/minecraft-farmers-market` with an SSH `origin` and `main` branch. **Blocked, not failed.** The local repository and `main` branch exist and the commit is ready to push, but `gh repo create` was refused by the workstation's Bash permission classifier — a tooling gate, not a pipeline failure and not an autonomy question (autonomous mode had already authorized it). No remote is configured. Resolve by granting the permission or by creating `carmelosantana/minecraft-farmers-market` manually, then `git remote add origin git@github.com:carmelosantana/minecraft-farmers-market.git && git push -u origin main`.
+- [x] Repository is `carmelosantana/minecraft-farmers-market` with an SSH `origin` and `main` branch. `origin` is `git@github.com:carmelosantana/minecraft-farmers-market.git`; `git status --short --branch` reports `## main...origin/main` with no divergence. The repository was created by the operator rather than by the agent: `gh repo create` was refused by the workstation's Bash permission classifier — a local tooling gate, not a pipeline failure and not an autonomy question, since autonomous mode had already authorized the action in writing at gate 1. The agent performed the remote add and push.
 - [x] Existing user-owned worktree changes were identified and preserved. The directory was empty at gate 1 preflight and was not a git repository; nothing user-owned existed to preserve.
 - [x] No `herobrinesystems` references remain in source, metadata, workflows, remotes, or documentation. `rg -n 'herobrinesystems' . --hidden -g '!target/**' -g '!.git/**'` returns exactly one hit: this checklist's own verification checkbox on the line above, which is the standard template wording carried by every plugin repository. No match in any source, metadata, workflow, remote, or prose.
 
@@ -320,7 +320,7 @@ real code.
 Gate 8a complete `2026-07-21`. Gate 8b belongs to `minecraft-plugin-release`.
 
 - [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior. `.github/workflows/build.yml` was copied from `timber-blast` and verified **byte-identical** by `diff`, so it carries the corrected `SHA256SUMS.txt` generation that records bare filenames rather than `target/`-prefixed paths.
-- [ ] Successful main Actions run is recorded before tagging. Not this skill's box to tick, and no run can exist yet — the repository has not been pushed. `minecraft-plugin-release` records this at gate 8b.
+- [ ] Successful main Actions run is recorded before tagging. Not this skill's box to tick — `minecraft-plugin-release` records it at gate 8b, against the commit actually being tagged. Evidence available for it: run `29886516873` on commit `1df4e6c`, `completed/success`, observed `2026-07-22`. That run built a scaffold with no production sources, so it is not evidence about the plugin; it only establishes that the workflow itself is sound.
 - [x] Workflow permissions contain no broader access than the documented contract. `permissions: contents: write`, and nothing else.
 
 ## 9. Release
