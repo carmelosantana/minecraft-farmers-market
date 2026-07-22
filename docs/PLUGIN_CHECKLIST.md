@@ -260,18 +260,23 @@ and runs gates 1 through 12 in full.
 
 ## 2. Repository
 
-- [ ] Repository is `carmelosantana/minecraft-farmers-market` with an SSH `origin` and `main` branch.
-- [ ] Existing user-owned worktree changes were identified and preserved.
-- [ ] No `herobrinesystems` references remain in source, metadata, workflows, remotes, or documentation.
+Gate 2 partially complete `2026-07-21`. Local repository initialized on `main` with one commit,
+`57b8f3f`, authored `Carmelo Santana <me@carmelosantana.com>`. Ten files tracked; `target/` ignored.
+
+- [ ] Repository is `carmelosantana/minecraft-farmers-market` with an SSH `origin` and `main` branch. **Blocked, not failed.** The local repository and `main` branch exist and the commit is ready to push, but `gh repo create` was refused by the workstation's Bash permission classifier — a tooling gate, not a pipeline failure and not an autonomy question (autonomous mode had already authorized it). No remote is configured. Resolve by granting the permission or by creating `carmelosantana/minecraft-farmers-market` manually, then `git remote add origin git@github.com:carmelosantana/minecraft-farmers-market.git && git push -u origin main`.
+- [x] Existing user-owned worktree changes were identified and preserved. The directory was empty at gate 1 preflight and was not a git repository; nothing user-owned existed to preserve.
+- [x] No `herobrinesystems` references remain in source, metadata, workflows, remotes, or documentation. `rg -n 'herobrinesystems' . --hidden -g '!target/**' -g '!.git/**'` returns exactly one hit: this checklist's own verification checkbox on the line above, which is the standard template wording carried by every plugin repository. No match in any source, metadata, workflow, remote, or prose.
 
 ## 3. Metadata
 
-- [ ] AGPL-3.0-or-later `LICENSE` and Maven license metadata are present and consistent.
-- [ ] `https://xpfarm.org` metadata and Carmelo Santana author metadata are present.
-- [ ] `play.xpfarm.org` is recorded as the public Minecraft server hostname where server identity is documented.
-- [ ] New work uses the `org.xpfarm` Maven group, or an existing-coordinate compatibility decision is documented.
-- [ ] Repository slug, artifact, releasable JAR, updater destination, and `plugin.yml` names are consistent.
-- [ ] No secrets committed in source, defaults, tests, logs, history, or documentation.
+Gate 3 complete `2026-07-21`.
+
+- [x] AGPL-3.0-or-later `LICENSE` and Maven license metadata are present and consistent. Full 661-line AGPL-3.0 text; `pom.xml` `<licenses>` names "GNU Affero General Public License v3.0 or later" pointing at `https://www.gnu.org/licenses/agpl-3.0.html`.
+- [x] `https://xpfarm.org` metadata and Carmelo Santana author metadata are present. `pom.xml` `<url>` and `<developers>`; `plugin.yml` `author:` and `website:`.
+- [x] `play.xpfarm.org` is recorded as the public Minecraft server hostname where server identity is documented. `README.md`, line 6.
+- [x] New work uses the `org.xpfarm` Maven group. `org.xpfarm:farmers-market:0.1.0`. No existing-coordinate carve-out was needed or taken.
+- [x] Repository slug, artifact, releasable JAR, updater destination, and `plugin.yml` names are consistent. Verified: project `<artifactId>farmers-market</artifactId>` (the coordinate directly under `<project>`; the other `<artifactId>` matches are dependency and build-plugin coordinates), `plugin.yml` `name: FarmersMarket`, built JAR `target/farmers-market-0.1.0.jar`, updater destination `farmers-market.jar`.
+- [x] No secrets committed in source, defaults, tests, logs, history, or documentation. `config.yml` ships empty maps and local paths only; no credentials, tokens, endpoints, or production configuration anywhere in the tree or the single commit.
 
 ## 4. Compatibility
 
@@ -292,6 +297,16 @@ and runs gates 1 through 12 in full.
 - [ ] `mvn --batch-mode --no-transfer-progress clean verify` succeeds.
 - [ ] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded.
 
+Both boxes deliberately left unchecked. A scaffold-only build **was** run on `2026-07-21` as a
+pre-push sanity check — `BUILD SUCCESS`, 7/7 `PluginDescriptorTest` assertions passing, Temurin
+25.0.3 and Maven 3.9.16, producing `target/farmers-market-0.1.0.jar` alongside
+`target/original-farmers-market-0.1.0.jar`, with the embedded descriptor confirmed to carry
+`version: '0.1.0'` (Maven filtering resolved) and `api-version: '26.1'`. That evidence is recorded
+here only to show the push would not have produced a red `main` run. **It is not gate 6.** The
+plugin has no main class yet, so the build compiled zero production sources and the descriptor test
+asserted against a `main:` class that does not exist. `minecraft-plugin-dev` ticks these against
+real code.
+
 ## 7. Matrix
 
 - [ ] Fresh-volume [Legendary Java Minecraft Geyser Floodgate stack](https://github.com/TheRemote/Legendary-Java-Minecraft-Geyser-Floodgate) test covers every updater-managed plugin.
@@ -302,9 +317,11 @@ and runs gates 1 through 12 in full.
 
 ## 8. CI/CD
 
-- [ ] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior.
-- [ ] Successful main Actions run is recorded before tagging.
-- [ ] Workflow permissions contain no broader access than the documented contract.
+Gate 8a complete `2026-07-21`. Gate 8b belongs to `minecraft-plugin-release`.
+
+- [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior. `.github/workflows/build.yml` was copied from `timber-blast` and verified **byte-identical** by `diff`, so it carries the corrected `SHA256SUMS.txt` generation that records bare filenames rather than `target/`-prefixed paths.
+- [ ] Successful main Actions run is recorded before tagging. Not this skill's box to tick, and no run can exist yet — the repository has not been pushed. `minecraft-plugin-release` records this at gate 8b.
+- [x] Workflow permissions contain no broader access than the documented contract. `permissions: contents: write`, and nothing else.
 
 ## 9. Release
 
