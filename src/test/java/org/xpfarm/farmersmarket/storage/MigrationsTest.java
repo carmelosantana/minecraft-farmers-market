@@ -19,6 +19,7 @@ import java.sql.Statement;
 import java.util.Locale;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -63,15 +64,21 @@ class MigrationsTest {
 
     @Test
     void rejectsSchemaCreatedFromAHigherVersionThanKnown(@TempDir Path dir) throws Exception {
-        // A downgrade scenario: the recorded version is already at the newest migration.
-        // Re-running applyTo must not attempt to re-run any migration and must report the
-        // same version back unchanged.
+        // Simulates an older jar (this build, knowing only MIGRATIONS.size() migrations)
+        // opening a database a newer jar already migrated further. applyTo must refuse
+        // outright rather than "handling" it by rewriting schema_version down to what this
+        // build knows -- that rewrite is exactly the bug this test exists to catch: it would
+        // make the newer jar replay migrations 2..99 on its next run, against data that
+        // already has them.
         try (Database database = Database.open(dir.resolve("m.db"), dir.resolve("tmp").toString(), 5000)) {
-            int first = Migrations.applyTo(database.connection());
-            int second = Migrations.applyTo(database.connection());
-            int third = Migrations.applyTo(database.connection());
-            assertEquals(first, second);
-            assertEquals(second, third);
+            Migrations.applyTo(database.connection());
+            setSchemaVersion(database.connection(), 99);
+
+            assertThrows(IllegalStateException.class, () -> Migrations.applyTo(database.connection()));
+
+            // The assertion that actually catches the bug: schema_version must be untouched,
+            // not silently rewritten down to this build's MIGRATIONS.size().
+            assertEquals(99, readSchemaVersion(database.connection()));
         }
     }
 
@@ -88,6 +95,25 @@ class MigrationsTest {
                 ResultSet rs = statement.executeQuery(pragma)) {
             rs.next();
             return rs.getString(1);
+        }
+    }
+
+    /** Force-writes {@code schema_version} to {@code version}, bypassing {@link Migrations}. */
+    private static void setSchemaVersion(Connection connection, int version) throws Exception {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("DELETE FROM schema_version");
+        }
+        try (var ps = connection.prepareStatement("INSERT INTO schema_version(version) VALUES (?)")) {
+            ps.setInt(1, version);
+            ps.executeUpdate();
+        }
+    }
+
+    private static int readSchemaVersion(Connection connection) throws Exception {
+        try (Statement statement = connection.createStatement();
+                ResultSet rs = statement.executeQuery("SELECT version FROM schema_version LIMIT 1")) {
+            rs.next();
+            return rs.getInt(1);
         }
     }
 }

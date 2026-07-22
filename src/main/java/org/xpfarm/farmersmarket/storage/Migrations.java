@@ -75,20 +75,41 @@ public final class Migrations {
      * @param connection the connection to migrate; its autocommit mode is restored to
      *                   whatever it was before this call returns, whether or not it succeeds
      * @return the resulting schema version, equal to {@link #MIGRATIONS}'s size
-     * @throws SQLException if creating the version table, reading it, applying a pending
-     *                       migration, or writing the new version fails; the transaction is
-     *                       rolled back first so a failed migration never leaves a partial
-     *                       schema committed
+     * @throws SQLException          if creating the version table, reading it, applying a
+     *                                pending migration, or writing the new version fails;
+     *                                the transaction is rolled back first so a failed
+     *                                migration never leaves a partial schema committed
+     * @throws IllegalStateException if the recorded version is already higher than the
+     *                                highest version this build knows -- see the fail-closed
+     *                                note above; nothing is written in this case, not even a
+     *                                partial transaction, because nothing was started
      */
     public static int applyTo(Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
         }
 
+        // Read-only check, deliberately outside the transaction below: an older jar opening a
+        // database a newer jar already migrated is a situation only a human can resolve, not
+        // one this method may "handle". The alternative -- running zero migrations but still
+        // rewriting schema_version down to this build's MIGRATIONS.size() -- would make the
+        // next run of the *newer* jar believe the migrations it already applied still need to
+        // run again, replaying anything non-idempotent (e.g. ALTER TABLE ... ADD COLUMN) onto
+        // data that already has it. Failing here, before touching the transaction at all,
+        // guarantees schema_version is never rewritten in this case.
+        int current = readVersion(connection);
+        if (current > MIGRATIONS.size()) {
+            throw new IllegalStateException(
+                    "FarmersMarket database schema_version is " + current + ", but this build's "
+                            + "highest known migration is " + MIGRATIONS.size() + ". This jar is older "
+                            + "than the database it just opened; refusing to apply any migration or "
+                            + "touch schema_version. Run the newer jar against this database instead, "
+                            + "or restore a database backup matching this build.");
+        }
+
         boolean previousAutoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
-            int current = readVersion(connection);
             for (int i = current; i < MIGRATIONS.size(); i++) {
                 try (Statement statement = connection.createStatement()) {
                     for (String sql : MIGRATIONS.get(i)) {
