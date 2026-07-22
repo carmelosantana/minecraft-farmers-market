@@ -30,21 +30,42 @@ import java.util.logging.Logger;
  * <p><b>{@link #close()} is a correctness boundary, not tidiness.</b> Paper cancels every
  * scheduled plugin task at disable, so any write still sitting in this executor's queue at
  * that moment is lost unless something flushes it synchronously first. {@code close()} is
- * that flush: it stops accepting new work, waits up to {@link #SHUTDOWN_TIMEOUT_SECONDS}
+ * that flush: it stops accepting new work, waits up to {@link #SHUTDOWN_TIMEOUT_MILLIS}
  * for the queue to drain, and only if that bound is exceeded does it give up and log how
  * much work it had to abandon. It never drops queued work silently.
  */
 public final class DatabaseExecutor implements AutoCloseable {
 
     /** How long {@link #close()} waits for the queue to drain before giving up on it. */
-    private static final long SHUTDOWN_TIMEOUT_SECONDS = 10;
+    private static final long SHUTDOWN_TIMEOUT_MILLIS = 10_000;
+
+    /**
+     * How long {@link #close()} waits <em>after</em> {@code shutdownNow()} before concluding a
+     * task is still executing. Short on purpose: this is not another chance to finish, it is
+     * only long enough to tell "the interrupt worked" apart from "the interrupt was ignored",
+     * and the caller is a server that is already stopping.
+     */
+    private static final long ABANDON_GRACE_MILLIS = 2_000;
 
     private static final Logger LOG = Logger.getLogger(DatabaseExecutor.class.getName());
 
     private final ExecutorService executor;
+    private final long shutdownTimeoutMillis;
+    private final long abandonGraceMillis;
 
     public DatabaseExecutor() {
+        this(SHUTDOWN_TIMEOUT_MILLIS, ABANDON_GRACE_MILLIS);
+    }
+
+    /**
+     * Package-private seam: the production bounds add up to twelve seconds, which no test can
+     * afford to wait out, and the timeout path is the one that produces the only reconciliation
+     * record a hung write ever leaves. Behaviour is identical either way.
+     */
+    DatabaseExecutor(long shutdownTimeoutMillis, long abandonGraceMillis) {
         this.executor = Executors.newSingleThreadExecutor(DatabaseExecutor::newWriterThread);
+        this.shutdownTimeoutMillis = shutdownTimeoutMillis;
+        this.abandonGraceMillis = abandonGraceMillis;
     }
 
     private static Thread newWriterThread(Runnable task) {
@@ -76,20 +97,29 @@ public final class DatabaseExecutor implements AutoCloseable {
 
     /**
      * Stops accepting new work and blocks the calling thread until every already-queued
-     * task has run, up to {@link #SHUTDOWN_TIMEOUT_SECONDS}.
+     * task has run, up to {@link #SHUTDOWN_TIMEOUT_MILLIS}.
      *
-     * <p>On timeout, this logs a warning naming exactly how many tasks were still queued --
-     * never silently -- and then calls {@link ExecutorService#shutdownNow()} to abandon
-     * them. An interrupt while waiting is treated the same way: the wait is abandoned, the
-     * interrupt flag is restored on this thread, and whatever remains queued is reported
-     * before being dropped.
+     * <p>On timeout, this logs a warning naming exactly what was lost -- never silently --
+     * and then calls {@link ExecutorService#shutdownNow()} to abandon it. An interrupt while
+     * waiting is treated the same way: the wait is abandoned, the interrupt flag is restored
+     * on this thread, and whatever remains is reported before being dropped.
+     *
+     * <p><b>Two numbers, not one, and the second one is the important one.</b>
+     * {@code shutdownNow()} returns only the tasks that had <em>not yet started</em>;
+     * a write already inside {@code sqlite-jdbc} is neither in that list nor actually
+     * interrupted, because the driver does not honour interrupts mid-statement. Reporting only
+     * the returned list therefore prints "abandoning 0 queued task(s)" in exactly the case that
+     * matters -- one live write, about to have its connection closed underneath it by
+     * {@code onDisable}. So this waits a short grace period after {@code shutdownNow()} and says
+     * whether the writer thread ever actually stopped. This warning is the only reconciliation
+     * record a shutdown produces; it must not under-report.
      */
     @Override
     public void close() {
         executor.shutdown();
         try {
-            if (!executor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                abandon("did not finish draining its queue within " + SHUTDOWN_TIMEOUT_SECONDS + "s");
+            if (!executor.awaitTermination(shutdownTimeoutMillis, TimeUnit.MILLISECONDS)) {
+                abandon("did not finish draining its queue within " + shutdownTimeoutMillis + "ms");
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -98,8 +128,25 @@ public final class DatabaseExecutor implements AutoCloseable {
     }
 
     private void abandon(String reason) {
-        List<Runnable> stillQueued = executor.shutdownNow();
-        LOG.warning("FarmersMarket-DB " + reason + "; abandoning " + stillQueued.size()
-                + " queued task(s).");
+        List<Runnable> neverStarted = executor.shutdownNow();
+        boolean stillRunning = !awaitStop();
+        LOG.warning("FarmersMarket-DB " + reason + "; dropped " + neverStarted.size()
+                + " queued task(s) that had not started, and " + (stillRunning
+                        ? "ONE task was STILL EXECUTING after " + abandonGraceMillis + "ms and an "
+                                + "interrupt. sqlite-jdbc does not honour interrupts mid-statement, "
+                                + "so that write may still be in progress as the database "
+                                + "connection closes: its outcome is unknown. Reconcile the ledger "
+                                + "by hand if a player reports a problem."
+                        : "no task was left executing."));
+    }
+
+    /** Whether the writer thread stopped within the grace period; restores the interrupt flag. */
+    private boolean awaitStop() {
+        try {
+            return executor.awaitTermination(abandonGraceMillis, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return executor.isTerminated();
+        }
     }
 }

@@ -256,6 +256,13 @@ public final class Ledger {
      * exceptions instead. On the success path there is no original to hide, so a failed
      * restoration propagates rather than leaving the connection silently stuck outside autocommit.
      *
+     * <p><b>Nesting is refused outright.</b> There is one connection, so an inner call's
+     * {@code commit()} would commit whatever the outer call had applied so far and then hand the
+     * outer call a transaction it no longer owns -- reopening exactly the half-applied-transfer
+     * window this class exists to close. JDBC offers no way to detect that other than autocommit
+     * already being off, so that is the check, made before anything is written. No such caller
+     * exists today; this method is package-private and M2 adds callers to this package.
+     *
      * <p>Package-private rather than private purely so {@code LedgerTest} can drive a failure that
      * is not an {@code Exception} through it. There is no other way to reach that path -- the
      * classes this method calls into are all {@code final} -- and the alternative is a guarantee
@@ -264,6 +271,11 @@ public final class Ledger {
      */
     <T> T inTransaction(Callable<T> work) throws Exception {
         Connection connection = database.connection();
+        if (!connection.getAutoCommit()) {
+            throw new IllegalStateException("nested transaction: this connection is already "
+                    + "inside one, and the inner commit would commit the outer caller's "
+                    + "half-applied work");
+        }
         boolean previousAutoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         Throwable failure = null;

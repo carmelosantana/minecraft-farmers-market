@@ -245,6 +245,36 @@ class LedgerTest {
         assertEquals(3_000L, ledger.balance(BOB).get().dust());
     }
 
+    /**
+     * A nested {@code inTransaction} must be refused before it writes anything.
+     *
+     * <p>There is one connection, so the inner call's {@code commit()} commits whatever the
+     * outer call had applied so far -- here, a debit with no matching credit -- and then leaves
+     * the outer call finishing a transaction it no longer owns. That is exactly the
+     * half-applied-transfer window this class already had to close once. {@code inTransaction}
+     * is package-private and M2 adds callers to this package, so the guard is what stops the
+     * next caller reopening it.
+     */
+    @Test
+    void aNestedTransactionIsRefusedRatherThanCommittingTheOuterOnesHalfAppliedWork()
+            throws Exception {
+        ledger.deposit(ALICE, Diamonds.ofDiamonds(10)).get();
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> executor.submit(() -> ledger.inTransaction(() -> {
+                    dao.upsertBalance(ALICE, 6_000L);
+                    return ledger.inTransaction(() -> {
+                        dao.upsertBalance(BOB, 1_000L);
+                        return null;
+                    });
+                })).get());
+
+        assertInstanceOf(IllegalStateException.class, thrown.getCause());
+        // Without the guard the inner commit lands ALICE's debit; with it, nothing is committed.
+        assertEquals(10_000L, ledger.balance(ALICE).get().dust());
+        assertEquals(0L, ledger.balance(BOB).get().dust());
+    }
+
     @Test
     void mergeThatWouldOverflowIsRefusedAndLeavesBothAccountsAlone() throws Exception {
         seedRaw(FLOODGATE_UUID, Long.MAX_VALUE);

@@ -32,7 +32,9 @@ import org.bukkit.Bukkit;
  * therefore checks {@code Bukkit.getPluginManager().isPluginEnabled("floodgate")} exactly once,
  * at construction, and only then reaches for Floodgate's API via {@link Class#forName}. Any
  * failure anywhere in that chain - the plugin absent, the class missing, the expected method
- * missing, a reflective invocation failure - resolves every player to Java edition.
+ * missing, a reflective invocation failure, or a {@link LinkageError} from a half-installed
+ * Floodgate whose classes cannot be resolved - resolves every player to Java edition. An
+ * {@code Error} that is not a linkage failure is not swallowed anywhere in this class.
  */
 public final class EditionResolver {
 
@@ -83,7 +85,7 @@ public final class EditionResolver {
             Object instance = apiClass.getMethod("getInstance").invoke(null);
             Method method = apiClass.getMethod(IS_FLOODGATE_PLAYER_METHOD, UUID.class);
             return new EditionResolver(instance, method);
-        } catch (ReflectiveOperationException | RuntimeException e) {
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
             if (logger != null) {
                 logger.log(Level.WARNING,
                         "Floodgate is enabled but its API could not be linked reflectively; "
@@ -95,9 +97,19 @@ public final class EditionResolver {
     }
 
     /**
-     * True when {@code uuid} belongs to a player connected through Floodgate. Never throws: a
-     * reflective failure at call time resolves to {@code false} (Java edition), same as
-     * Floodgate being absent.
+     * True when {@code uuid} belongs to a player connected through Floodgate. A reflective
+     * failure at call time resolves to {@code false} (Java edition), same as Floodgate being
+     * absent.
+     *
+     * <p>{@link LinkageError} is caught alongside the reflective failures because a
+     * half-installed or version-mismatched Floodgate throws {@link NoClassDefFoundError} rather
+     * than an exception: {@code getMethod} has to resolve the declared return type, and a type
+     * it cannot load fails at link time, not reflectively. Without it, every Bedrock join would
+     * print a stack trace forever.
+     *
+     * <p>Deliberately <em>not</em> {@code Error} or {@code Throwable}. Swallowing an
+     * {@link OutOfMemoryError} or a {@link StackOverflowError} here to answer "Java edition"
+     * would hide a JVM in trouble behind a cosmetic default. Those still propagate.
      */
     public boolean isBedrock(UUID uuid) {
         if (isFloodgatePlayerMethod == null) {
@@ -106,7 +118,7 @@ public final class EditionResolver {
         try {
             Object result = isFloodgatePlayerMethod.invoke(floodgateApi, uuid);
             return result instanceof Boolean bool && bool;
-        } catch (ReflectiveOperationException | RuntimeException e) {
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
             return false;
         }
     }
@@ -121,9 +133,11 @@ public final class EditionResolver {
      * merges it. That merge needs both UUIDs, and this is the only place the old one is
      * reachable: {@code FloodgateApi.getPlayer(uuid).getLinkedPlayer().getBedrockId()}.
      *
-     * <p>Never throws, exactly like {@link #isBedrock}. Floodgate absent, the player unlinked,
-     * an API shape that moved between Floodgate versions, or any reflective failure all resolve
-     * to {@link Optional#empty()}, and an empty result means the caller simply performs no
+     * <p>Resolves to empty on failure, exactly like {@link #isBedrock}, and on the same terms:
+     * Floodgate absent, the player unlinked, an API shape that moved between Floodgate versions,
+     * any reflective failure, or a {@link LinkageError} from a half-installed Floodgate all give
+     * {@link Optional#empty()}; an {@code Error} that is not a linkage failure still propagates.
+     * An empty result means the caller simply performs no
      * merge -- which is the same behaviour as not having this method at all. That is the whole
      * safety argument for reaching three hops deep into someone else's API reflectively.
      *
@@ -146,7 +160,7 @@ public final class EditionResolver {
             }
             Object bedrockId = invokePublic(linked, "getBedrockId", new Class<?>[0]);
             return bedrockId instanceof UUID found ? Optional.of(found) : Optional.empty();
-        } catch (ReflectiveOperationException | RuntimeException e) {
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
             return Optional.empty();
         }
     }

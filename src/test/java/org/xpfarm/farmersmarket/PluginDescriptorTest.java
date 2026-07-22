@@ -20,6 +20,8 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 import org.yaml.snakeyaml.Yaml;
 
@@ -190,5 +192,41 @@ final class PluginDescriptorTest {
         assertNotNull(libraries, "libraries is required — the SQLite driver is not shaded");
         assertTrue(libraries.toString().contains("org.xerial:sqlite-jdbc"),
                 "the SQLite JDBC driver must be declared in libraries");
+    }
+
+    /**
+     * The two declarations of the driver version must agree. {@code pom.xml} governs what the
+     * code compiles and tests against; {@code plugin.yml} {@code libraries:} governs what Paper
+     * actually downloads and puts on the runtime classpath. Nothing links them, so a POM bump
+     * that misses the descriptor produces a plugin that compiles, tests green, enables happily,
+     * and then fails on its first query against a driver it was never built for.
+     */
+    @Test
+    void theLibrariesCoordinateCarriesExactlyThePomsSqliteVersion() throws IOException {
+        String pomVersion = sqliteVersionFromPom();
+        Object libraries = parse(PLUGIN_YML).get("libraries");
+        assertNotNull(libraries, "libraries is required — the SQLite driver is not shaded");
+
+        assertTrue(libraries.toString().contains("org.xerial:sqlite-jdbc:" + pomVersion),
+                "plugin.yml libraries: must declare org.xerial:sqlite-jdbc:" + pomVersion
+                        + " to match pom.xml, but declares " + libraries);
+    }
+
+    /**
+     * The {@code <version>} of the {@code org.xerial:sqlite-jdbc} dependency, read out of the
+     * POM itself rather than restated here — a constant in this file would be a third place to
+     * forget to update.
+     */
+    private static String sqliteVersionFromPom() throws IOException {
+        String pom = Files.readString(Path.of("pom.xml"));
+        Matcher matcher = Pattern.compile(
+                "<groupId>\\s*org\\.xerial\\s*</groupId>\\s*"
+                        + "<artifactId>\\s*sqlite-jdbc\\s*</artifactId>\\s*"
+                        + "<version>\\s*([^<\\s]+)\\s*</version>").matcher(pom);
+
+        assertTrue(matcher.find(),
+                "could not find the org.xerial:sqlite-jdbc dependency in pom.xml; this test "
+                        + "cannot compare a version it did not read");
+        return matcher.group(1);
     }
 }

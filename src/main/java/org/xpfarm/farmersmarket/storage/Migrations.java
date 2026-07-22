@@ -75,6 +75,17 @@ public final class Migrations {
      * @param connection the connection to migrate; its autocommit mode is restored to
      *                   whatever it was before this call returns, whether or not it succeeds
      * @return the resulting schema version, equal to {@link #MIGRATIONS}'s size
+     * <p><b>Every failure rolls back, {@code Throwable} and not {@code Exception}, and that
+     * distinction is the schema.</b> An {@link Error} part-way through a migration would skip a
+     * narrower {@code catch}, and restoring autocommit on the way out is implemented by the
+     * driver as a {@code COMMIT} of the still-open transaction -- committing a half-applied
+     * schema and recording nothing about it. That is survivable today only because every
+     * statement in {@code MIGRATION_1} is {@code CREATE ... IF NOT EXISTS}; the first
+     * {@code ALTER TABLE ... ADD COLUMN} makes it permanent damage. Neither the rollback nor the
+     * autocommit restoration may replace the failure that caused them -- both are attached to
+     * the original as suppressed exceptions instead. This mirrors
+     * {@code Ledger.inTransaction} exactly, deliberately.
+     *
      * @throws SQLException          if creating the version table, reading it, applying a
      *                                pending migration, or writing the new version fails;
      *                                the transaction is rolled back first so a failed
@@ -109,6 +120,7 @@ public final class Migrations {
 
         boolean previousAutoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
+        Throwable failure = null;
         try {
             for (int i = current; i < MIGRATIONS.size(); i++) {
                 try (Statement statement = connection.createStatement()) {
@@ -123,11 +135,23 @@ public final class Migrations {
             }
             connection.commit();
             return newVersion;
-        } catch (SQLException e) {
-            connection.rollback();
-            throw e;
+        } catch (Throwable t) {
+            failure = t;
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                t.addSuppressed(rollbackFailure);
+            }
+            throw t;
         } finally {
-            connection.setAutoCommit(previousAutoCommit);
+            try {
+                connection.setAutoCommit(previousAutoCommit);
+            } catch (SQLException restoreFailure) {
+                if (failure == null) {
+                    throw restoreFailure;
+                }
+                failure.addSuppressed(restoreFailure);
+            }
         }
     }
 

@@ -18,8 +18,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
 
@@ -102,6 +104,44 @@ final class MarketCommandTest {
     }
 
     /**
+     * A ledger operation that settles after the plugin is disabled loses its handler: no items
+     * are handed over, no message reaches the player, no compensation runs. The
+     * <em>successful</em> case is the one that costs money -- Paper clears {@code isEnabled}
+     * before {@code onDisable}, and {@code onDisable} flushes the executor, so a withdrawal
+     * submitted a moment before a stop can commit with nobody left to deliver it.
+     *
+     * <p>These pin that the line is produced with a null cause at all (a success), and that it
+     * carries everything an admin needs to reconcile by hand from the log alone.
+     */
+    @Test
+    void aCommittedOperationLosingItsHandlerAtShutdownStillProducesAReconciliationLine() {
+        UUID player = UUID.fromString("00000000-0000-0000-0000-0000000000a1");
+
+        String line = MarketCommand.shutdownReconciliationLine(
+                player, "withdrawing 64 diamonds", null);
+
+        assertTrue(line.contains(player.toString()), "must name the player: " + line);
+        assertTrue(line.contains("withdrawing 64 diamonds"),
+                "must name the operation and the amount: " + line);
+        assertTrue(line.contains("APPLIED"),
+                "a null cause means the ledger committed, and the line must say so: " + line);
+    }
+
+    @Test
+    void aFailedOperationAtShutdownSaysTheOutcomeIsUnknownRatherThanApplied() {
+        UUID player = UUID.fromString("00000000-0000-0000-0000-0000000000a2");
+
+        String line = MarketCommand.shutdownReconciliationLine(player, "depositing 8 diamonds",
+                new IllegalStateException("connection closed"));
+
+        assertTrue(line.contains(player.toString()), "must name the player: " + line);
+        assertTrue(line.contains("depositing 8 diamonds"),
+                "must name the operation and the amount: " + line);
+        assertFalse(line.contains("APPLIED"),
+                "a failure must not be reported as applied: " + line);
+    }
+
+    /**
      * The block-ramp characters {@code U+2581}-{@code U+2587} are absent from Bedrock's glyph
      * sheet and render as <em>blank space</em> rather than as a visible error, so a message built
      * from them arrives with its meaning silently missing. A raw section sign would smuggle in
@@ -124,12 +164,15 @@ final class MarketCommandTest {
      */
     @Test
     void noStringConstantInTheCommandPackageUsesAGlyphGeyserCannotRender() throws IOException {
-        List<Path> classes = List.of(
-                compiled("MarketCommand.class"), compiled("MarketResolver.class"));
+        // Every compiled class in the package, listed rather than named. Naming them missed
+        // MarketResolver$Sub, which carries string constants of its own, and would go on
+        // missing every class M2-M5 add to this package -- silently, since an unscanned class
+        // cannot fail a scan.
+        List<Path> classes = compiledCommandClasses();
+        assertTrue(classes.size() >= 2,
+                "found only " + classes + " to scan; this test needs compiled classes");
 
         for (Path file : classes) {
-            assertTrue(Files.exists(file),
-                    "cannot find " + file + " to scan; this test needs compiled classes");
             byte[] bytecode = Files.readAllBytes(file);
 
             for (char forbidden = '▁'; forbidden <= '▇'; forbidden++) {
@@ -157,8 +200,16 @@ final class MarketCommandTest {
         assertFalse(contains(haystack, utf8('▁')), "the scanner reports a glyph that is not there");
     }
 
-    private static Path compiled(String name) {
-        return Path.of("target", "classes", "org", "xpfarm", "farmersmarket", "command", name);
+    /** Every {@code *.class} the command package compiles to, including nested classes. */
+    private static List<Path> compiledCommandClasses() throws IOException {
+        Path dir = Path.of("target", "classes", "org", "xpfarm", "farmersmarket", "command");
+        assertTrue(Files.isDirectory(dir),
+                "cannot find " + dir + " to scan; this test needs compiled classes");
+        try (Stream<Path> entries = Files.list(dir)) {
+            return entries.filter(path -> path.getFileName().toString().endsWith(".class"))
+                    .sorted()
+                    .toList();
+        }
     }
 
     private static byte[] utf8(char c) {

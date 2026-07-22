@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -79,6 +80,92 @@ class FmConfigTest {
         assertEquals("plugins/FarmersMarket/tmp", config.sqliteTmpdir());
         assertEquals(BarGlyphs.DENSITY_4, config.barGlyphs());
         assertEquals(VendorPlacementMode.OWNED_AND_DISTRICT, config.vendorPlacementMode());
+    }
+
+    /**
+     * Every boolean default, pinned.
+     *
+     * <p>{@code liquidity.farm-output-audit} is the one that matters most: it is the check that
+     * refuses a buy-back floor at or above what the item costs to farm, which is an infinite
+     * money faucet. Defaulting it to {@code false} would disarm that on every server that never
+     * touched the key, and nothing else in the suite would notice.
+     */
+    @Test
+    void everyBooleanDefaultsToOnIncludingTheFaucetSafetySwitch() {
+        FmConfig config = FmConfig.load(new MapConfigSource(Map.of()), w -> {
+        });
+
+        assertTrue(config.farmOutputAudit(),
+                "the faucet audit must default ON; off, a misconfigured floor mints money");
+        assertTrue(config.buybackEnabled());
+        assertTrue(config.buyLimitEnabled());
+        assertTrue(config.vendorLabelEnabled());
+        assertTrue(config.stallsEnabled());
+        assertTrue(config.chartsEnabled());
+        assertTrue(config.bedrockTouchSimplify());
+    }
+
+    /**
+     * The other half of the test above: an operator's explicit {@code false} must actually be
+     * read. Together they pin the default and the plumbing -- a getter hardcoded to {@code true}
+     * passes the first test and fails this one.
+     */
+    @Test
+    void everyBooleanIsReadFromTheConfigWhenItIsSetToFalse() {
+        Map<String, Object> allOff = new LinkedHashMap<>();
+        allOff.put("liquidity.farm-output-audit", false);
+        allOff.put("liquidity.buyback-enabled", false);
+        allOff.put("limits.buy-limit-enabled", false);
+        allOff.put("vendor.label-enabled", false);
+        allOff.put("stalls.enabled", false);
+        allOff.put("ui.charts-enabled", false);
+        allOff.put("ui.bedrock-touch-simplify", false);
+
+        FmConfig config = FmConfig.load(new MapConfigSource(allOff), w -> {
+        });
+
+        assertFalse(config.farmOutputAudit());
+        assertFalse(config.buybackEnabled());
+        assertFalse(config.buyLimitEnabled());
+        assertFalse(config.vendorLabelEnabled());
+        assertFalse(config.stallsEnabled());
+        assertFalse(config.chartsEnabled());
+        assertFalse(config.bedrockTouchSimplify());
+    }
+
+    /**
+     * Zero is a legal, documented value for both keys whose contract is {@code >= 0}: no
+     * playtime requirement, and no minimum spacing between vendors. Validating them with
+     * "strictly greater than 0" instead would silently substitute the default for an operator
+     * who meant exactly what they typed, warning about a value that was never wrong.
+     */
+    @Test
+    void zeroIsAcceptedForBothKeysWhoseMinimumIsZero() {
+        List<String> warnings = new ArrayList<>();
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("limits.min-playtime-hours", 0);
+        source.put("vendor.min-distance-blocks", 0);
+
+        FmConfig config = FmConfig.load(new MapConfigSource(source), warnings::add);
+
+        assertEquals(0, config.minPlaytimeHours());
+        assertEquals(0, config.vendorMinDistanceBlocks());
+        assertTrue(warnings.isEmpty(), () -> "0 is legal for both keys, got " + warnings);
+    }
+
+    /** The other side of that boundary: below zero is still refused, and still warns. */
+    @Test
+    void negativeIsRefusedForBothKeysWhoseMinimumIsZero() {
+        List<String> warnings = new ArrayList<>();
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("limits.min-playtime-hours", -1);
+        source.put("vendor.min-distance-blocks", -1);
+
+        FmConfig config = FmConfig.load(new MapConfigSource(source), warnings::add);
+
+        assertEquals(2, config.minPlaytimeHours());
+        assertEquals(24, config.vendorMinDistanceBlocks());
+        assertEquals(2, warnings.size(), () -> "both keys must warn, got " + warnings);
     }
 
     @Test

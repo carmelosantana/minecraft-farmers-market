@@ -137,7 +137,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
 
     private void balance(Player player) {
         UUID id = player.getUniqueId();
-        onMainThread(ledger.balance(id), (held, failure) -> {
+        onMainThread(ledger.balance(id), id, "reading a balance", (held, failure) -> {
             Player online = plugin.getServer().getPlayer(id);
             if (online == null) {
                 return;
@@ -235,25 +235,27 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
         Diamonds credited = moved == wanted ? amount : Diamonds.ofDiamonds(moved);
 
         Location where = player.getLocation();
-        onMainThread(ledger.deposit(id, credited), (balance, failure) -> {
-            if (failure == null) {
-                message(id, text("Deposited " + moved + " diamonds. Balance: " + balance.format(),
-                        NamedTextColor.GREEN));
-                return;
-            }
-            if (failure instanceof LedgerException refused) {
-                // A refusal is definite: nothing was written, so the items are safe to return.
-                giveOrDrop(id, where, moved);
-                message(id, text(MarketResolver.messageFor(refused.reason(), null)
-                        + " Your " + moved + " diamonds were returned.", NamedTextColor.RED));
-                return;
-            }
-            // Unknown, not failed. Returning the items could dupe them; retrying could charge
-            // twice. Say so, log it, and leave it for a human.
-            reportUncertain(id, "depositing " + moved + " diamonds", failure,
-                    "The diamonds have left your inventory and were NOT returned, "
-                            + "because putting them back could duplicate them.");
-        });
+        onMainThread(ledger.deposit(id, credited), id, "depositing " + moved + " diamonds",
+                (balance, failure) -> {
+                    if (failure == null) {
+                        message(id, text("Deposited " + moved + " diamonds. Balance: "
+                                + balance.format(), NamedTextColor.GREEN));
+                        return;
+                    }
+                    if (failure instanceof LedgerException refused) {
+                        // A refusal is definite: nothing was written, so the items are safe to
+                        // return.
+                        giveOrDrop(id, where, moved);
+                        message(id, text(MarketResolver.messageFor(refused.reason(), null)
+                                + " Your " + moved + " diamonds were returned.", NamedTextColor.RED));
+                        return;
+                    }
+                    // Unknown, not failed. Returning the items could dupe them; retrying could
+                    // charge twice. Say so, log it, and leave it for a human.
+                    reportUncertain(id, "depositing " + moved + " diamonds", failure,
+                            "The diamonds have left your inventory and were NOT returned, "
+                                    + "because putting them back could duplicate them.");
+                });
     }
 
     // ---- withdraw ---------------------------------------------------------------------
@@ -291,22 +293,24 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
 
         int count = (int) wanted;
         Location where = player.getLocation();
-        onMainThread(ledger.withdraw(id, amount), (balance, failure) -> {
-            if (failure == null) {
-                message(id, text("Withdrew " + count + " diamonds. Balance: " + balance.format(),
-                        NamedTextColor.GREEN));
-                deliver(id, where, count);
-                return;
-            }
-            if (failure instanceof LedgerException refused) {
-                // A refusal means the debit never happened, so there is nothing to undo. The
-                // balance is only re-read to fill in the number the player wants to hear.
-                explainRefusedWithdrawal(id, refused);
-                return;
-            }
-            reportUncertain(id, "withdrawing " + count + " diamonds", failure,
-                    "No diamonds were handed over.");
-        });
+        onMainThread(ledger.withdraw(id, amount), id, "withdrawing " + count + " diamonds",
+                (balance, failure) -> {
+                    if (failure == null) {
+                        message(id, text("Withdrew " + count + " diamonds. Balance: "
+                                + balance.format(), NamedTextColor.GREEN));
+                        deliver(id, where, count);
+                        return;
+                    }
+                    if (failure instanceof LedgerException refused) {
+                        // A refusal means the debit never happened, so there is nothing to undo.
+                        // The balance is only re-read to fill in the number the player wants to
+                        // hear.
+                        explainRefusedWithdrawal(id, refused);
+                        return;
+                    }
+                    reportUncertain(id, "withdrawing " + count + " diamonds", failure,
+                            "No diamonds were handed over.");
+                });
     }
 
     /**
@@ -322,8 +326,8 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
             message(id, text(MarketResolver.messageFor(refused.reason(), null), NamedTextColor.RED));
             return;
         }
-        onMainThread(ledger.balance(id), (held, readFailure) ->
-                message(id, text(MarketResolver.messageFor(refused.reason(),
+        onMainThread(ledger.balance(id), id, "reading a balance to explain a refused withdrawal",
+                (held, readFailure) -> message(id, text(MarketResolver.messageFor(refused.reason(),
                         readFailure == null ? held : null), NamedTextColor.RED)));
     }
 
@@ -354,30 +358,32 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
         }
 
         int returned = leftOver;
-        onMainThread(ledger.deposit(id, Diamonds.ofDiamonds(returned)), (balance, failure) -> {
-            if (failure == null) {
-                message(id, text("Your inventory filled up, so " + returned
-                        + " diamonds went back into the market.", NamedTextColor.YELLOW));
-                return;
-            }
-            if (failure instanceof LedgerException) {
-                // A refusal is definite: the credit was not written, so this side is
-                // unambiguously still holding the diamonds and handing them over physically
-                // cannot duplicate anything. It is not a retry of the credit.
-                Player again = plugin.getServer().getPlayer(id);
-                dropAt(again != null ? again.getLocation() : where, returned);
-                message(id, text("Your inventory filled up, so " + returned
-                        + " diamonds were dropped at your feet.", NamedTextColor.YELLOW));
-                LOG.log(Level.WARNING, "FarmersMarket: " + id + "'s balance refused the return "
-                        + "of " + returned + " undelivered diamonds, so they were dropped as "
-                        + "items instead. The player still has them.", failure);
-                return;
-            }
-            reportUncertain(id, "returning " + returned + " undelivered diamonds to the balance",
-                    failure,
-                    "Those " + returned + " diamonds were not handed over. They may or may not "
-                            + "be back in your balance.");
-        });
+        onMainThread(ledger.deposit(id, Diamonds.ofDiamonds(returned)), id,
+                "returning " + returned + " undelivered diamonds to the balance",
+                (balance, failure) -> {
+                    if (failure == null) {
+                        message(id, text("Your inventory filled up, so " + returned
+                                + " diamonds went back into the market.", NamedTextColor.YELLOW));
+                        return;
+                    }
+                    if (failure instanceof LedgerException) {
+                        // A refusal is definite: the credit was not written, so this side is
+                        // unambiguously still holding the diamonds and handing them over
+                        // physically cannot duplicate anything. It is not a retry of the credit.
+                        Player again = plugin.getServer().getPlayer(id);
+                        dropAt(again != null ? again.getLocation() : where, returned);
+                        message(id, text("Your inventory filled up, so " + returned
+                                + " diamonds were dropped at your feet.", NamedTextColor.YELLOW));
+                        LOG.log(Level.WARNING, "FarmersMarket: " + id + "'s balance refused the "
+                                + "return of " + returned + " undelivered diamonds, so they were "
+                                + "dropped as items instead. The player still has them.", failure);
+                        return;
+                    }
+                    reportUncertain(id, "returning " + returned
+                                    + " undelivered diamonds to the balance", failure,
+                            "Those " + returned + " diamonds were not handed over. They may or "
+                                    + "may not be back in your balance.");
+                });
     }
 
     // ---- reload -----------------------------------------------------------------------
@@ -545,16 +551,31 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
      * completion in this class goes through it. That is deliberate: one hop is auditable, and a
      * completion that quietly forgot to hop would touch an inventory from the database writer
      * thread.
+     *
+     * <h2>Settling after the plugin is disabled</h2>
+     *
+     * <p>Paper flips {@code isEnabled} to {@code false} <em>before</em> it calls
+     * {@code onDisable}, and {@code onDisable} then calls {@code DatabaseExecutor.close()},
+     * which <b>runs</b> whatever is still queued rather than discarding it. So a task submitted
+     * moments before a stop can commit and settle on this branch having <em>succeeded</em> --
+     * the money has moved and there is no main thread left to hand the items over on. That is
+     * the dangerous case, not the failure case, which is why the log line below is written
+     * unconditionally and names the player, the operation, and the amount: it is the entire
+     * record that a shutdown-time withdrawal leaves behind, and it has to be reconcilable by
+     * hand from the log alone, to the same standard {@link #reportUncertain} sets.
+     *
+     * @param id      the player the operation belongs to, named in the shutdown log line
+     * @param what    the operation and its amount, e.g. {@code "withdrawing 64 diamonds"}, for
+     *                the same line
      */
-    private <T> void onMainThread(CompletableFuture<T> future, BiConsumer<T, Throwable> handler) {
+    private <T> void onMainThread(CompletableFuture<T> future, UUID id, String what,
+                                  BiConsumer<T, Throwable> handler) {
         future.whenComplete((value, failure) -> {
             Throwable cause = unwrap(failure);
             if (!plugin.isEnabled()) {
-                // The server is shutting down; there is no main thread left to schedule onto.
-                if (cause != null) {
-                    LOG.log(Level.WARNING, "FarmersMarket: a ledger operation failed after the "
-                            + "plugin was disabled, so nobody was told.", cause);
-                }
+                // The server is shutting down; there is no main thread left to schedule onto,
+                // so the handler -- the delivery, the message, the compensation -- never runs.
+                LOG.log(Level.WARNING, shutdownReconciliationLine(id, what, cause), cause);
                 return;
             }
             try {
@@ -586,6 +607,30 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
      * go-find-an-admin message. Same seam as {@code Ledger.inTransaction} and
      * {@code EditionResolver.invokePublic}.
      */
+    /**
+     * The one log line a ledger operation leaves behind when it settles after the plugin was
+     * disabled.
+     *
+     * <p>Written whether the operation succeeded or failed, because <b>success is the outcome
+     * that costs a player money here</b>: the debit committed during {@code onDisable}'s flush,
+     * the handler that would have handed the diamonds over never ran, and nothing else in the
+     * plugin will ever mention it. An admin holding only this line must be able to reconcile the
+     * account, so it names the player UUID, the operation, the amount, and which of the two
+     * outcomes happened.
+     *
+     * <p>Package-private and pure so it can be tested: building it inside the completion would
+     * put the only shutdown-time money record behind a running Paper server. Same seam as
+     * {@link #unwrap}.
+     */
+    static String shutdownReconciliationLine(UUID id, String what, Throwable cause) {
+        return "FarmersMarket: " + what + " (player " + id + ") settled after the plugin was "
+                + "disabled, so nothing was handed over, the player was not told, and nothing "
+                + "was compensated. " + (cause == null
+                        ? "The ledger APPLIED it -- the balance has already moved."
+                        : "The ledger reported a failure; it may or may not have applied.")
+                + " Reconcile this account by hand.";
+    }
+
     static Throwable unwrap(Throwable failure) {
         Throwable cause = failure;
         while ((cause instanceof CompletionException || cause instanceof ExecutionException)
@@ -624,16 +669,17 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
             }
         }
 
-        onMainThread(ledger.balance(id), (held, readFailure) -> {
-            if (readFailure == null) {
-                LOG.warning("FarmersMarket: after that unconfirmed operation, " + id
-                        + "'s balance now reads " + held.format() + " diamonds.");
-                return;
-            }
-            LOG.log(Level.WARNING, "FarmersMarket: could not read " + id + "'s balance after "
-                    + "that unconfirmed operation, so the log cannot say whether it landed.",
-                    readFailure);
-        });
+        onMainThread(ledger.balance(id), id, "reading a balance after an unconfirmed operation",
+                (held, readFailure) -> {
+                    if (readFailure == null) {
+                        LOG.warning("FarmersMarket: after that unconfirmed operation, " + id
+                                + "'s balance now reads " + held.format() + " diamonds.");
+                        return;
+                    }
+                    LOG.log(Level.WARNING, "FarmersMarket: could not read " + id + "'s balance "
+                            + "after that unconfirmed operation, so the log cannot say whether "
+                            + "it landed.", readFailure);
+                });
     }
 
     /** Sends {@code component} to {@code id} if they are still online, and drops it if not. */
