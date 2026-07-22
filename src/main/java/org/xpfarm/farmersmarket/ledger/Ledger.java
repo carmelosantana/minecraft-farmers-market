@@ -183,6 +183,13 @@ public final class Ledger {
      * should still reject paying yourself at the command layer, because a silent success is a
      * confusing answer to a command a player did not mean to type.
      *
+     * <p><b>M2: this method opens its own transaction. Do not call it from inside one.</b> A sale
+     * that wants to move money and write a listing, an escrow row, and a trade-log row atomically
+     * cannot wrap this call in {@link #inTransaction} -- there is one connection, and the guard
+     * there refuses the nesting outright. Put the whole sale inside one {@link #inTransaction}
+     * and use {@link AccountDao} plus the {@link Diamonds} arithmetic directly, or give this
+     * class a method that does the whole sale. See {@link #inTransaction} for why.
+     *
      * @param from   the account to debit
      * @param to     the account to credit
      * @param amount the amount to move; must not be negative
@@ -201,6 +208,12 @@ public final class Ledger {
             if (from.equals(to)) {
                 return null;
             }
+            // Opens a transaction. M2 is the milestone that makes nesting reachable -- a sale
+            // needs the money move, the escrow row, and the trade-log row in one transaction --
+            // so if you are here to compose this call into a larger operation, stop: one
+            // connection means the inner commit would commit the outer caller's half-applied
+            // work, and inTransaction refuses the nesting rather than allowing it. Compose
+            // inside a single inTransaction over the DAO instead.
             return inTransaction(() -> {
                 Diamonds held = Diamonds.ofDust(accounts.balanceDust(from));
                 Diamonds remaining = held.minus(amount);
@@ -248,6 +261,10 @@ public final class Ledger {
             if (floodgateUuid.equals(javaUuid)) {
                 return null;
             }
+            // Opens a transaction, exactly as transfer does, and with the same warning: this is
+            // not composable into a larger one. When M2 gives a linking player their listings,
+            // escrow, and open offers as well, the transaction has to be widened here rather
+            // than by wrapping this call -- see inTransaction's nesting guard.
             return inTransaction(() -> {
                 if (alreadyLinked(floodgateUuid)) {
                     return null;
@@ -306,8 +323,18 @@ public final class Ledger {
      * {@code commit()} would commit whatever the outer call had applied so far and then hand the
      * outer call a transaction it no longer owns -- reopening exactly the half-applied-transfer
      * window this class exists to close. JDBC offers no way to detect that other than autocommit
-     * already being off, so that is the check, made before anything is written. No such caller
-     * exists today; this method is package-private and M2 adds callers to this package.
+     * already being off, so that is the check, made before anything is written.
+     *
+     * <p><b>M2 is the milestone that makes nesting reachable, and the two existing call sites are
+     * where it will be reached from.</b> {@link #transfer} and {@link #mergeAccounts} each open
+     * their own transaction; an M2 sale that wants the money move, the escrow row, and the
+     * immutable trade-log row to commit or fail together cannot get that by wrapping either of
+     * them, and the guard above turns the attempt into an {@link IllegalStateException} rather
+     * than a silently half-applied trade. The way to compose is to write the whole operation as
+     * one {@code inTransaction} body over {@link AccountDao}, reusing the {@link Diamonds}
+     * arithmetic for the overflow checks, or to add a method here that owns the whole operation.
+     * Do not add a re-entrancy count or a savepoint to make nesting work: SQLite savepoints would
+     * let an outer failure keep an inner success, which for a trade log is worse than refusing.
      *
      * <p>Package-private rather than private purely so {@code LedgerTest} can drive a failure that
      * is not an {@code Exception} through it. There is no other way to reach that path -- the
