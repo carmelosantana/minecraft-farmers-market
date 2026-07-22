@@ -223,10 +223,22 @@ Testable pass/fail conditions. These become gate 6 unit tests and gate 7a runtim
 
 **Economy health**
 
-11. No configured buy-back floor is at or above its `liquidity.farm-output-costs` entry, and a floor with no matching cost entry fails config load rather than defaulting. `farm-output-audit` refuses to load a config that violates either rule.
+11. No configured buy-back floor is at or above its `liquidity.farm-output-costs` entry, and no floor loads for an item with no matching cost entry. `farm-output-audit` drops each offending entry and warns, naming the item; the surviving map contains only audited floors, and the plugin still enables. The unsafe floor never reaches the economy, which is the property that matters — the plugin does not refuse to start over one bad entry, because a market with one missing floor is better than no market at all.
+    - Wording note: an earlier draft of this check said such a floor "fails config load". It does not, and should not — the *entry* is refused, not the whole config. Recorded so a later reader does not mistake the implemented behaviour for a defect.
 12. A player exceeding a rolling buy limit is refused, and the refusal does not consume currency or stock.
 13. XP fees are charged against real XP points and cannot be transferred between players by any code path.
 14. Published prices exclude trades beyond `outlier-filter-mad`; a single 100× outlier trade does not move the published price.
+
+**Shutdown and durability**
+
+Added `2026-07-22` after the M1 whole-branch review found a money-destruction path here that no
+per-task review could see, because it spans the command layer, the executor, and the plugin
+lifecycle. The plan calls the bounded shutdown flush "a correctness requirement, not politeness";
+nothing in this section previously held it to that.
+
+23. `DatabaseExecutor.close()` drains queued writes rather than abandoning them, and its warning distinguishes work that was queued-and-dropped from work that was still executing when it gave up.
+24. `onDisable` closes the executor before the database, so no write is running when the connection closes.
+25. A write that commits during shutdown — after Paper has already set `isEnabled = false` but while `onDisable`'s flush is still running — leaves a log line naming the player, the operation, and the amount. This window is **recorded, not eliminated**: the debit commits and the items are never handed over, so the log line is the only thing making it reconcilable. Verified at gate 7a, not by unit test.
 
 **Cross-platform — gate 7a, on the Legendary stack**
 
@@ -280,34 +292,102 @@ Gate 3 complete `2026-07-21`.
 
 ## 4. Compatibility
 
-- [ ] Java 25/Paper 26.1.2 build 74 compile succeeds and `plugin.yml` uses `api-version: '26.1'`, matching the API compiled against (see `PLUGIN_LIFECYCLE.md` §4 — a lower value opts the JAR into Paper's `Commodore` bytecode rewrites).
-- [ ] Hard dependencies, soft dependencies, optional APIs, and load ordering were reviewed and declared.
-- [ ] Geyser/Floodgate/ViaVersion review covers Bedrock-safe input, UI, inventory, identity, and protocol behavior.
+Gate 4 complete `2026-07-22` for milestone M1 (`0.1.0`).
+
+- [x] Java 25/Paper 26.1.2 build 74 compile succeeds and `plugin.yml` uses `api-version: '26.1'`. Built with Temurin 25.0.3 and Maven 3.9.16; the embedded descriptor in the shaded JAR was inspected and shows `api-version: '26.1'` and `version: '0.1.0'` (Maven filtering resolved). `PluginDescriptorTest` asserts the `String` type of `api-version`, so an unquoted value that would parse as a double cannot ship.
+- [x] Hard dependencies, soft dependencies, optional APIs, and load ordering were reviewed and declared. **No hard dependencies.** Soft: `Floodgate`, declared in `plugin.yml` `softdepend` for load ordering only and never on the compile classpath. Runtime library: `org.xerial:sqlite-jdbc:3.53.2.0` via `plugin.yml` `libraries:`, `provided` scope in the POM so it is never shaded. Observed loading correctly at gate 7a: `[SpigotLibraryLoader] [FarmersMarket] Loaded library .../sqlite-jdbc-3.53.2.0.jar`. `PluginDescriptorTest` asserts the `libraries:` coordinate carries the same version as `pom.xml`, so the two cannot drift.
+- [x] Geyser/Floodgate/ViaVersion review covers Bedrock-safe input, UI, inventory, identity, and protocol behavior. **Input:** M1 is command-only; no UI, inventory GUI, or form exists yet (M3). **Output:** all player-facing text is plain legacy-coloured chat — no hover events, click events, hex/RGB, gradients, strikethrough, or underline, each of which Geyser strips or downgrades. Enforced by a test that scans the *compiled class bytes* of the whole `command` package for the UTF-8 encodings of `§` and `U+2581`–`U+2587`; a source-text scan was tried first and rejected because Java decodes `\uXXXX` in the lexer, making an escaped glyph invisible in source and present in the compiled string. **Identity:** everything is keyed on UUID, never username, because Floodgate's username prefix is config-mutable. The Floodgate→Java UUID account merge is implemented and unit-tested; see §7 for what remains unverified about it. **Protocol:** the plugin reads no protocol version and makes no client-version assumption, so ViaVersion-bridged clients are unaffected.
 
 ## 5. External services
 
-- [ ] External integrations are disabled by default or require explicit configuration and have bounded timeouts.
-- [ ] Ollama/Umami-style external endpoints are optional and failure-tolerant when applicable.
-- [ ] Endpoint failure cannot fail server/plugin startup, and diagnostics redact secrets.
+Gate 5 is satisfied by there being nothing to satisfy it. This plugin makes **zero** outbound
+network calls — no Ollama, no Umami, no HTTP client, no telemetry, no outside endpoint of any kind.
+The Global Constraints forbade adding one, and the whole-branch review confirmed none was added.
+
+- [x] External integrations are disabled by default or require explicit configuration and have bounded timeouts. Vacuously true: there are no external integrations. The only I/O is a local SQLite file.
+- [x] Ollama/Umami-style external endpoints are optional and failure-tolerant when applicable. Not applicable — none exist.
+- [x] Endpoint failure cannot fail server/plugin startup, and diagnostics redact secrets. No endpoint exists to fail. On secrets: `rg` across the tree and the shipped `config.yml` inside the JAR found no credentials, tokens, or endpoints; every match was prose. The plugin logs player UUIDs and diamond amounts for reconciliation, which is operational data rather than a secret, and never logs a username.
 
 ## 6. Tests and build
 
 - [ ] Unit tests cover separable logic, configuration, serialization, permissions, and failure paths where applicable.
 - [ ] `PluginDescriptorTest` parses `plugin.yml` and `config.yml` with SnakeYAML and asserts `name`, `main`, a `String`-typed `api-version`, a fully-substituted `version`, every command the code looks up, every permission the code checks, and the declared soft dependencies.
-- [ ] `mvn --batch-mode --no-transfer-progress clean verify` succeeds.
-- [ ] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded.
+- [x] `mvn --batch-mode --no-transfer-progress clean verify` succeeds. `BUILD SUCCESS`, **173 tests, 0 failures, 0 errors, 0 skipped**, on `2026-07-22` at commit `fec0b81`.
+- [x] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded. Exactly one non-`original-*` JAR, `target/farmers-market-0.1.0.jar`. Embedded descriptor verified: `name`, `main`, `api-version: '26.1'`, fully-substituted `version: '0.1.0'`, the `market` command, all three permission nodes, `softdepend`, and `libraries`. **Shading review:** the JAR bundles nothing — `org/bukkit`, `io/papermc`, `org/sqlite`, `org/yaml`, and `org/junit` each return 0 entries, so no server API and no runtime-loaded library leaked in.
 
-Both boxes deliberately left unchecked. A scaffold-only build **was** run on `2026-07-21` as a
-pre-push sanity check — `BUILD SUCCESS`, 7/7 `PluginDescriptorTest` assertions passing, Temurin
-25.0.3 and Maven 3.9.16, producing `target/farmers-market-0.1.0.jar` alongside
-`target/original-farmers-market-0.1.0.jar`, with the embedded descriptor confirmed to carry
-`version: '0.1.0'` (Maven filtering resolved) and `api-version: '26.1'`. That evidence is recorded
-here only to show the push would not have produced a red `main` run. **It is not gate 6.** The
-plugin has no main class yet, so the build compiled zero production sources and the descriptor test
-asserted against a `main:` class that does not exist. `minecraft-plugin-dev` ticks these against
-real code.
+### Test-strength discipline
+
+Worth recording because it changed the outcome. **Four tests on this branch were caught passing
+while asserting nothing about the mechanism they named**, and two of those were written into the
+implementation plan by the planner rather than by an implementer. A green count is not evidence
+that assertions bite.
+
+From Task 4 onward every task mutation-checked its own guard tests — delete the mechanism the test
+names, confirm the test actually fails. That discipline found: the `Error`-skips-rollback money
+destruction path, the hollow self-transfer guard, a non-deterministic flush test that would have
+passed with `awaitTermination` deleted, `applyTo`'s idempotency being untested (the SQL's
+`IF NOT EXISTS` was doing the work), the `org.sqlite.tmpdir` property never being asserted, and
+every boolean config default being unpinned — including `farm-output-audit`, which **is** the
+faucet safety switch. One glyph-guard rewrite was itself caught by the check before it shipped.
+
+M2 should keep this. It is the single highest-yield practice this milestone adopted.
 
 ## 7. Matrix
+
+### 7a — single-plugin runtime verification: PASSED `2026-07-22`
+
+Disposable fresh-volume Legendary stack, slot 0, project
+`xpfarm-plugin-test-farmers-market-b44fbbfb`. Booted from `target/farmers-market-0.1.0.jar` at
+commit `fec0b81`, verified, and torn down; slot lease released.
+
+**Startup.** Paper logged its own `Done (15.368s)! For help`. The Java port answered a real
+Minecraft protocol handshake — `Paper 26.1.2 | protocol 775` — not merely a TCP connect. RCON
+`plugins` listed **four plugins, all green**: `FarmersMarket`, `floodgate`, `Geyser-Spigot`
+(2.11.0-SNAPSHOT), `ViaVersion` (5.11.0). The whole cross-play stack starts together.
+
+**Enable path.** `[SpigotLibraryLoader] Loaded library .../sqlite-jdbc-3.53.2.0.jar` →
+`Loading server plugin FarmersMarket v0.1.0` → `database ready at plugins/FarmersMarket/market.db
+(schema version 1)` → `FarmersMarket enabled.` The data folder contains `market.db`,
+`market.db-wal`, and `market.db-shm`, confirming WAL is genuinely active on the real server, plus
+the `tmp/` directory proving `org.sqlite.tmpdir` was created before the driver loaded — the noexec
+container hazard the design called out.
+
+**Commands over RCON.** `/market`, `/market balance`, `/market deposit`, and `/market withdraw 5`
+from the console each replied with `'<sub>' needs a player with an inventory, so the console cannot
+run it. Console can run /market reload.` — a clear refusal, **no `ClassCastException`**.
+`/market reload` returned `Farmers Market configuration reloaded.` No server-wide plugin hot reload
+was used at any point.
+
+**Configuration validation and the faucet audit, end to end.** A deliberately unsafe `config.yml`
+was written into the running container and reloaded. All four expected warnings fired and the
+plugin stayed enabled:
+
+- `economy.sales-tax-percent` `150.0` → out-of-range, defaulted to `7.0`.
+- `liquidity.buyback-floors` `DIAMOND` `10.0` against a cost of `10.0` → **refused**, *"this would be an infinite money faucet."*
+- `liquidity.buyback-floors` `GOLD_INGOT` with no cost entry → **refused fail-closed**, *"an unestimated item is the dangerous case."*
+- `analytics.index-basket: 42` → wrong-typed container key, warned and defaulted to `[]`.
+- `IRON_INGOT` at `1.0` against a cost of `4.0` → loaded silently, correctly.
+
+This is acceptance check 11 demonstrated on a real server, not merely unit-tested.
+
+**Shutdown.** Graceful `stop`: `Disabling FarmersMarket v0.1.0` with no abandoned-task warning
+(nothing was queued) and no exception. **Zero exceptions, stack traces, or `SEVERE` lines appeared
+anywhere in the entire run**, startup through shutdown.
+
+### What gate 7a could NOT reach — carried to the gate 12 play-test
+
+No client attaches to this stack by design, and no RCON test-harness plugin exists yet, so
+`rcon` proves a command ran, not that an event fired. Named here so `minecraft-plugin-handoff`
+carries them forward as real obligations rather than silence:
+
+1. **Every player-path command.** `balance`, `deposit`, and `withdraw` are console-refused by design, so their *success* paths — the entire inventory-movement surface — ran zero times. Acceptance check 1 (deposit then withdraw conserves both balance and physical diamond count) is unverified on its physical half.
+2. **The compensation paths.** Both reviewers demanded this specifically: force a ledger failure *during* `deliver` (e.g. `chmod` the database file after the debit lands) rather than accepting a happy-path withdraw. The unknown-outcome policy that prevents minting lives exactly where no unit test can reach.
+3. **The shutdown reconciliation line** (check 25). Run `/market withdraw 64`, stop the server inside the window, and confirm the log line names the player, the operation, **and** the amount. The window is recorded, not eliminated, so that line is the only thing making a committed-but-undelivered withdrawal reconcilable.
+4. **The Floodgate account merge** (check 22) — **the highest-value open question.** Confirm `isFloodgatePlayer(javaUuid)` returns true for an **already-linked** player. If it returns false, the join guard short-circuits and the entire merge feature is dead code that fails silently — the exact outcome the merge exists to prevent. Floodgate is deliberately off the test classpath, so this cannot be settled statically.
+5. **Merge idempotence across repeated joins**, since the merge runs on every join.
+6. **`LinkageError` handling in `EditionResolver`** — reasoned and implemented, but reproducing a raw linkage failure needs a bytecode fixture or custom classloader, both excluded by the no-new-dependency constraint. Unverified, not blocking.
+
+### 7b — full-roster matrix
 
 - [ ] Fresh-volume [Legendary Java Minecraft Geyser Floodgate stack](https://github.com/TheRemote/Legendary-Java-Minecraft-Geyser-Floodgate) test covers every updater-managed plugin.
 - [ ] Each updater-managed plugin's manifest `enabled` value, default state, and expected fresh-volume behavior are recorded separately.
@@ -355,3 +435,44 @@ state, not a failure.
 - [ ] Client play-test obligation recorded with a named owner and a target date: `<owner>` / `<date>`.
 - [ ] Client play-test outcome recorded once performed, covering Java join, Bedrock join, and any form, inventory, or rendered item behavior this plugin introduces. Leave unchecked with the owner and date above until the team has run it; an unchecked box here does not block a release, but an unrecorded obligation is a gate 12 failure.
 - [ ] Public deployment reachability confirmed during that pass: `play.xpfarm.org` reaches the intended Java and Bedrock entry points.
+
+---
+
+## Milestone status
+
+`0.1.0` is **M1 of five**. The v1 scope recorded in §1 above is delivered across five milestones,
+each running its own gates 4-7a and its own release. This was decided at gate 4 after a scope check
+measured the single-plan build at 3-4x the largest existing plugin in the ecosystem (Timber Blast,
+7k lines / 56 files) and the writing-plans scope check called for splitting it.
+
+| Milestone | Scope | State |
+|---|---|---|
+| **M1** `0.1.0` | config, storage, identity, ledger, `/market` balance/deposit/withdraw/reload | **complete** — gates 4, 5, 6, 7a passed |
+| M2 `0.2.0` | listings, item identity, commodity matching, escrow, fees/tax, the immutable trade log | not started |
+| M3 `0.3.0` | cross-platform UI — Java chest GUI, Bedrock Cumulus forms | not started |
+| M4 `0.4.0` | vendors, `TextDisplay` labels, stalls, sealed-bid rent | not started |
+| M5 `0.5.0` | price history, basket index, map-item charts | not started |
+
+The second reason for the split matters more than the size one: **five of the design's decisions
+are unverified assumptions about Geyser behaviour** (§1 Known limitations). A single-plan build
+would have stacked ~25k lines on top of them before any was tested against a real Bedrock client.
+M1 and M2 carry zero Bedrock risk and can be built with full confidence; M3 gets built on measured
+ground.
+
+### M2 entry conditions
+
+Do these before M2 adds its first config key or schema change, while nothing has copied the current
+shape yet:
+
+- Extract `ConfigValidator` from `FmConfig` to match the sibling plugin's shape. M2-M5 will copy
+  whichever shape M1 sets, which is why this is an entry condition rather than a Minor.
+- Add `AccountDao.upsertAccount(AccountRow)` and `AccountDao.findLink(UUID)`. The first makes
+  `AccountMerge`'s computed timestamps actually persist — today only `into.uuid()` is used, so all
+  four `AccountMergeTest` tests pin behaviour no production path observes. The second replaces an
+  O(n) full-table scan on every player join.
+- Give `Ledger` a typed pre-write-failure reason. Today a `SELECT` failure before any `UPDATE` is
+  indistinguishable from an unknown outcome, so `deposit` refuses to return items it could safely
+  return.
+- Move `MarketCommand.LOG` to the plugin logger, and reattach the two doc/wording items already
+  fixed in `fec0b81`.
+- Keep the mutation-check discipline. It is the highest-yield practice M1 adopted.

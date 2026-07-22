@@ -12,56 +12,31 @@ softdepend: [Floodgate]
 
 # The SQLite JDBC driver is loaded at runtime rather than shaded. Paper still bundles
 # org.xerial:sqlite-jdbc, but its own build file marks that as legacy and "eventually to be
-# removed", so the plugin owns its driver. Version pending confirmation at gate 4.
+# removed", so the plugin owns its driver. Version confirmed resolvable from Maven Central at
+# gate 4, and PluginDescriptorTest asserts this coordinate carries the same version as pom.xml so
+# the two cannot drift.
 libraries:
   - org.xerial:sqlite-jdbc:3.53.2.0
 
+# Commands and permissions are declared for what this build actually implements, and nothing
+# more. Listings, vendors, stalls, charts, and the community pot belong to M2-M5 and re-add
+# their own nodes alongside the code that reads them; declaring them early tells an operator
+# they have a knob that does nothing.
 commands:
   market:
-    description: Browse, buy, sell, and manage your market vendors
-    usage: /market [browse | sell | orders | buy | balance | deposit | withdraw | chart | index | vendor | stall | admin]
+    description: Check your diamond balance, deposit diamonds, and withdraw them again
+    usage: /market [balance | deposit | withdraw | reload]
     aliases: [mkt, fm]
 
 permissions:
   farmersmarket.use:
-    description: Browse, buy, sell, deposit, and withdraw
-    default: true
-  farmersmarket.vendor.place:
-    description: Place a stationary market vendor
-    default: true
-  farmersmarket.stall.rent:
-    description: Bid on a market-town stall
-    default: true
-  farmersmarket.chart:
-    description: Request a rendered map price chart
+    description: Check your balance, deposit diamonds, and withdraw them
     default: true
   farmersmarket.admin:
     description: All Farmers Market administration
     default: op
     children:
       farmersmarket.admin.reload: true
-      farmersmarket.admin.floor: true
-      farmersmarket.admin.audit: true
-      farmersmarket.admin.freeze: true
-      farmersmarket.admin.pot: true
   farmersmarket.admin.reload:
     description: Reload the Farmers Market configuration
     default: op
-  farmersmarket.admin.floor:
-    description: Set or clear a server buy-back floor
-    default: op
-  farmersmarket.admin.audit:
-    description: Read the immutable trade log
-    default: op
-  farmersmarket.admin.freeze:
-    description: Suspend trading on a single item
-    default: op
-  farmersmarket.admin.pot:
-    description: View and disburse the community tax pot
-    default: op
-  farmersmarket.bypass.fees:
-    description: Waive listing fees and sales tax - staff and testing only
-    default: false
-  farmersmarket.bypass.buylimit:
-    description: Waive rolling per-item buy limits - staff and testing only
-    default: false

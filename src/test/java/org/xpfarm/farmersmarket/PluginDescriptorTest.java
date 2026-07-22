@@ -20,6 +20,8 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 import org.yaml.snakeyaml.Yaml;
 
@@ -108,21 +110,67 @@ final class PluginDescriptorTest {
         assertNotNull(permissions, "permissions section is required");
 
         for (String node : new String[] {
-            "farmersmarket.use",
-            "farmersmarket.vendor.place",
-            "farmersmarket.stall.rent",
-            "farmersmarket.chart",
-            "farmersmarket.admin",
-            "farmersmarket.admin.reload",
-            "farmersmarket.admin.floor",
-            "farmersmarket.admin.audit",
-            "farmersmarket.admin.freeze",
-            "farmersmarket.admin.pot",
-            "farmersmarket.bypass.fees",
-            "farmersmarket.bypass.buylimit",
+            "farmersmarket.use", "farmersmarket.admin", "farmersmarket.admin.reload",
         }) {
             assertTrue(permissions.containsKey(node), node + " must be declared");
         }
+    }
+
+    /**
+     * The mirror of the test above, and the reason both exist. Declaring a permission for a
+     * feature no code implements tells an operator they have a knob that does nothing; worse,
+     * it lets a future edit start <em>checking</em> a node nobody re-examined the meaning of.
+     * Each later milestone re-adds its own nodes alongside the code that reads them.
+     */
+    @Test
+    void pluginYmlDoesNotDeclarePermissionsForUnbuiltMilestones() throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> permissions = (Map<String, Object>) parse(PLUGIN_YML).get("permissions");
+        assertNotNull(permissions, "permissions section is required");
+
+        for (String unbuilt : new String[] {
+            "farmersmarket.vendor.place", "farmersmarket.stall.rent", "farmersmarket.chart",
+            "farmersmarket.admin.floor", "farmersmarket.admin.audit",
+            "farmersmarket.admin.freeze", "farmersmarket.admin.pot",
+            "farmersmarket.bypass.fees", "farmersmarket.bypass.buylimit",
+        }) {
+            assertFalse(permissions.containsKey(unbuilt),
+                    unbuilt + " belongs to a later milestone and must not be declared yet");
+        }
+    }
+
+    /**
+     * The {@code farmersmarket.admin} parent must not grant a child node that no longer exists.
+     * Paper registers an undeclared child as a permission in its own right, so a stale entry
+     * here quietly re-creates exactly the node the test above just removed.
+     */
+    @Test
+    void adminParentOnlyGrantsChildrenThatStillExist() throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> permissions = (Map<String, Object>) parse(PLUGIN_YML).get("permissions");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> admin = (Map<String, Object>) permissions.get("farmersmarket.admin");
+        assertNotNull(admin, "farmersmarket.admin must be declared");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> children = (Map<String, Object>) admin.get("children");
+        assertNotNull(children, "farmersmarket.admin must declare its children");
+        for (String child : children.keySet()) {
+            assertTrue(permissions.containsKey(child),
+                    "farmersmarket.admin grants '" + child + "', which is not declared anywhere");
+        }
+    }
+
+    /** The usage line an operator reads must name the subcommands that actually exist. */
+    @Test
+    void marketUsageNamesOnlyTheSubcommandsM1Implements() throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> commands = (Map<String, Object>) parse(PLUGIN_YML).get("commands");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> market = (Map<String, Object>) commands.get("market");
+        assertNotNull(market, "the market command must be declared");
+
+        assertEquals("/market [balance | deposit | withdraw | reload]", market.get("usage"));
     }
 
     @Test
@@ -144,5 +192,41 @@ final class PluginDescriptorTest {
         assertNotNull(libraries, "libraries is required — the SQLite driver is not shaded");
         assertTrue(libraries.toString().contains("org.xerial:sqlite-jdbc"),
                 "the SQLite JDBC driver must be declared in libraries");
+    }
+
+    /**
+     * The two declarations of the driver version must agree. {@code pom.xml} governs what the
+     * code compiles and tests against; {@code plugin.yml} {@code libraries:} governs what Paper
+     * actually downloads and puts on the runtime classpath. Nothing links them, so a POM bump
+     * that misses the descriptor produces a plugin that compiles, tests green, enables happily,
+     * and then fails on its first query against a driver it was never built for.
+     */
+    @Test
+    void theLibrariesCoordinateCarriesExactlyThePomsSqliteVersion() throws IOException {
+        String pomVersion = sqliteVersionFromPom();
+        Object libraries = parse(PLUGIN_YML).get("libraries");
+        assertNotNull(libraries, "libraries is required — the SQLite driver is not shaded");
+
+        assertTrue(libraries.toString().contains("org.xerial:sqlite-jdbc:" + pomVersion),
+                "plugin.yml libraries: must declare org.xerial:sqlite-jdbc:" + pomVersion
+                        + " to match pom.xml, but declares " + libraries);
+    }
+
+    /**
+     * The {@code <version>} of the {@code org.xerial:sqlite-jdbc} dependency, read out of the
+     * POM itself rather than restated here — a constant in this file would be a third place to
+     * forget to update.
+     */
+    private static String sqliteVersionFromPom() throws IOException {
+        String pom = Files.readString(Path.of("pom.xml"));
+        Matcher matcher = Pattern.compile(
+                "<groupId>\\s*org\\.xerial\\s*</groupId>\\s*"
+                        + "<artifactId>\\s*sqlite-jdbc\\s*</artifactId>\\s*"
+                        + "<version>\\s*([^<\\s]+)\\s*</version>").matcher(pom);
+
+        assertTrue(matcher.find(),
+                "could not find the org.xerial:sqlite-jdbc dependency in pom.xml; this test "
+                        + "cannot compare a version it did not read");
+        return matcher.group(1);
     }
 }
