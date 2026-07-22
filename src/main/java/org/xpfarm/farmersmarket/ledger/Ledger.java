@@ -223,12 +223,20 @@ public final class Ledger {
                 // through Diamonds first is what makes an overflowing pair refuse with
                 // AMOUNT_TOO_LARGE instead of wrapping into a negative balance -- which the
                 // accounts table's CHECK constraint would then reject with a far less useful
-                // error, after the delete had already been staged.
+                // error, after the delete had already been staged. This check runs BEFORE the
+                // merge is applied and its result is what gets written: the merged row's own
+                // balance is never trusted.
                 Diamonds total = Diamonds.ofDust(from.diamondsDust()).plus(Diamonds.ofDust(into.diamondsDust()));
-                AccountRow survivor = AccountMerge.merge(from, into);
+                AccountRow merged = AccountMerge.merge(from, into);
+                AccountRow survivor = new AccountRow(merged.uuid(), total.dust(),
+                        merged.createdAtEpochMs(), merged.updatedAtEpochMs());
 
                 accounts.deleteAccount(floodgateUuid);
-                accounts.upsertBalance(survivor.uuid(), total.dust());
+                // upsertAccount, not upsertBalance: the merged row's min(created_at) and
+                // max(updated_at) are the point of the merge, and upsertBalance would stamp its
+                // own clock over both -- silently replacing an older Bedrock account's creation
+                // time with the Java row's.
+                accounts.upsertAccount(survivor);
                 accounts.insertLink(floodgateUuid, javaUuid, nowEpochMs);
                 return null;
             });
@@ -306,18 +314,12 @@ public final class Ledger {
     /**
      * Whether {@code floodgateUuid} has already been merged into some Java account.
      *
-     * <p>Reads the whole link table and scans it, because {@link AccountDao} exposes no lookup
-     * by Floodgate UUID and Task 2's DAO is not this task's to change. The table holds one row
-     * per Bedrock player who has ever linked, so this is small today; a {@code findLink(UUID)}
-     * on the DAO is the right fix once it is not.
+     * <p>One primary-key lookup. This runs inside the merge transaction on every join of every
+     * Bedrock player, so the full-table scan it used to do -- reading {@code allLinks()} and
+     * walking it -- grew with the number of players who had ever linked, on the join path.
      */
     private boolean alreadyLinked(UUID floodgateUuid) throws SQLException {
-        for (UUID[] link : accounts.allLinks()) {
-            if (floodgateUuid.equals(link[0])) {
-                return true;
-            }
-        }
-        return false;
+        return accounts.findLink(floodgateUuid).isPresent();
     }
 
     /**

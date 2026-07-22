@@ -14,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.xpfarm.farmersmarket.storage.AccountDao;
+import org.xpfarm.farmersmarket.storage.AccountRow;
 import org.xpfarm.farmersmarket.storage.Database;
 import org.xpfarm.farmersmarket.storage.DatabaseExecutor;
 import org.xpfarm.farmersmarket.storage.Migrations;
@@ -330,6 +331,48 @@ class LedgerTest {
         assertEquals(1, dao.allLinks().size());
     }
 
+    /**
+     * The merged row's timestamps must reach the database.
+     *
+     * <p>{@code AccountMerge.merge} computes {@code min(created_at)} and {@code max(updated_at)}
+     * across the two accounts. Writing the result through {@code upsertBalance} discarded both --
+     * that method stamps its own clock -- so a Bedrock player who had played for a year and then
+     * linked a fresh Java account came out of the merge looking newly created. Nothing in
+     * production observed the merge rule at all, which is why it is checked here and not only in
+     * {@code AccountMergeTest}.
+     */
+    @Test
+    void mergeWritesTheMergedRowsOwnTimestampsSoTheOlderCreationTimeSurvives() throws Exception {
+        seedRow(new AccountRow(FLOODGATE_UUID, 2_000L, 1_000L, 5_000L));
+        seedRow(new AccountRow(JAVA_UUID, 1_000L, 3_000L, 4_000L));
+
+        ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 1_700_000_000_000L).get();
+
+        AccountRow survivor = readRow(JAVA_UUID);
+        assertEquals(3_000L, survivor.diamondsDust());
+        assertEquals(1_000L, survivor.createdAtEpochMs(),
+                "the earlier of the two creation times must survive the merge");
+        assertEquals(5_000L, survivor.updatedAtEpochMs(),
+                "the later of the two update times must survive the merge");
+    }
+
+    /**
+     * A merge into an account with no row at all still records a creation time from the
+     * Floodgate side, rather than the merge's own clock, for the same reason.
+     */
+    @Test
+    void mergeIntoAnAbsentJavaAccountKeepsTheFloodgateAccountsCreationTime() throws Exception {
+        seedRow(new AccountRow(FLOODGATE_UUID, 500L, 1_000L, 2_000L));
+
+        ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 8_000L).get();
+
+        AccountRow survivor = readRow(JAVA_UUID);
+        assertEquals(500L, survivor.diamondsDust());
+        assertEquals(1_000L, survivor.createdAtEpochMs());
+        assertEquals(8_000L, survivor.updatedAtEpochMs(),
+                "the absent side is stamped with the merge time, so that is the later of the two");
+    }
+
     @Test
     void mergeSumsBothSidesWhenBothHeldABalance() throws Exception {
         ledger.deposit(FLOODGATE_UUID, Diamonds.parse("0.750")).get();
@@ -346,6 +389,19 @@ class LedgerTest {
             dao.upsertBalance(uuid, dust);
             return null;
         }).get();
+    }
+
+    /** Writes a whole row, timestamps included, on the executor's thread. */
+    private void seedRow(AccountRow row) throws Exception {
+        executor.submit(() -> {
+            dao.upsertAccount(row);
+            return null;
+        }).get();
+    }
+
+    /** Reads a whole row on the executor's thread; the connection belongs to that thread. */
+    private AccountRow readRow(UUID uuid) throws Exception {
+        return executor.submit(() -> dao.findAccount(uuid).orElseThrow()).get();
     }
 
     private LedgerException.Reason reasonOfFailure(org.junit.jupiter.api.function.Executable call) {

@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -91,6 +92,93 @@ class AccountDaoTest {
         dao.upsertBalance(player, 11L);
 
         assertEquals(createdAt, dao.findAccount(player).orElseThrow().createdAtEpochMs());
+    }
+
+    @Test
+    void upsertAccountPersistsTheRowsOwnTimestampsRatherThanTheClock() {
+        // The merge path computes min(created_at) and max(updated_at) across the two accounts
+        // being folded together. If this method stamped its own clock -- as upsertBalance does --
+        // both computed values would be discarded on the way to the database and the merge rule
+        // would be decoration.
+        UUID player = UUID.randomUUID();
+        AccountRow row = new AccountRow(player, 7L, 111L, 222L);
+
+        assertDoesNotThrow(() -> dao.upsertAccount(row));
+
+        AccountRow stored = assertDoesNotThrow(() -> dao.findAccount(player).orElseThrow());
+        assertEquals(7L, stored.diamondsDust());
+        assertEquals(111L, stored.createdAtEpochMs());
+        assertEquals(222L, stored.updatedAtEpochMs());
+    }
+
+    @Test
+    void upsertAccountOverwritesAnExistingRowsCreatedAtWhichUpsertBalanceRefusesTo() throws SQLException {
+        // The two upserts differ here and nowhere else. A linking Bedrock player's older
+        // creation time has to be able to replace the Java row's newer one.
+        UUID player = UUID.randomUUID();
+        dao.upsertAccount(new AccountRow(player, 1L, 9_000L, 9_000L));
+
+        dao.upsertAccount(new AccountRow(player, 2L, 1_000L, 9_500L));
+
+        AccountRow stored = dao.findAccount(player).orElseThrow();
+        assertEquals(2L, stored.diamondsDust());
+        assertEquals(1_000L, stored.createdAtEpochMs(), "an earlier creation time must be able to win");
+        assertEquals(9_500L, stored.updatedAtEpochMs());
+        assertEquals(1, countAccountRows());
+    }
+
+    @Test
+    void upsertAccountRejectsANegativeBalanceLikeEveryOtherWrite() {
+        UUID player = UUID.randomUUID();
+
+        assertThrows(SQLException.class, () -> dao.upsertAccount(new AccountRow(player, -1L, 1L, 1L)));
+    }
+
+    @Test
+    void findLinkReturnsTheJavaUuidForARecordedLink() throws SQLException {
+        UUID floodgate = UUID.randomUUID();
+        UUID java = UUID.randomUUID();
+        dao.insertLink(floodgate, java, 1L);
+
+        assertEquals(Optional.of(java), dao.findLink(floodgate));
+    }
+
+    @Test
+    void findLinkIsEmptyForAnUnlinkedUuidAndDoesNotMatchTheJavaSideOfALink() throws SQLException {
+        // Keyed on the Floodgate UUID only. Answering "yes" for the Java UUID of an existing
+        // link would make a second merge think it had already run and strand a balance.
+        UUID floodgate = UUID.randomUUID();
+        UUID java = UUID.randomUUID();
+        dao.insertLink(floodgate, java, 1L);
+
+        assertTrue(dao.findLink(UUID.randomUUID()).isEmpty());
+        assertTrue(dao.findLink(java).isEmpty());
+    }
+
+    @Test
+    void findLinkSeesTheCorrectedTargetAfterALinkIsOverwritten() throws SQLException {
+        UUID floodgate = UUID.randomUUID();
+        UUID firstJava = UUID.randomUUID();
+        UUID secondJava = UUID.randomUUID();
+        dao.insertLink(floodgate, firstJava, 1L);
+
+        dao.insertLink(floodgate, secondJava, 2L);
+
+        assertEquals(Optional.of(secondJava), dao.findLink(floodgate));
+    }
+
+    @Test
+    void findLinkAndAllLinksAgreeOnEveryRecordedLink() throws SQLException {
+        // findLink replaced a scan of allLinks() on the join path; if the two ever disagreed,
+        // the merge would either run twice or never.
+        for (int i = 0; i < 5; i++) {
+            dao.insertLink(UUID.randomUUID(), UUID.randomUUID(), i);
+        }
+
+        for (UUID[] link : dao.allLinks()) {
+            assertEquals(Optional.of(link[1]), dao.findLink(link[0]));
+        }
+        assertEquals(5, dao.allLinks().size());
     }
 
     @Test
