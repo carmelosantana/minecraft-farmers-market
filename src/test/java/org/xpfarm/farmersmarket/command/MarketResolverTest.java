@@ -11,6 +11,7 @@ package org.xpfarm.farmersmarket.command;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -281,6 +282,20 @@ final class MarketResolverTest {
                     MarketResolver.messageFor(LedgerException.Reason.INSUFFICIENT_FUNDS, null);
 
             assertEquals("You do not have that many diamonds.", message);
+        }
+
+        @Test
+        void nothingWrittenTellsThePlayerNothingChangedRatherThanThatItIsUncertain() {
+            // The ledger sets this reason only when it knows the write never started, so the
+            // player is owed a definite answer. UNCERTAIN_MESSAGE says the opposite -- go and
+            // check your balance -- and sending someone looking for a problem that is not there
+            // is how a plugin teaches its players to distrust it.
+            String message = MarketResolver.messageFor(LedgerException.Reason.NOTHING_WRITTEN, null);
+
+            assertEquals("The market could not be reached, so nothing was changed. "
+                    + "Try again in a moment.", message);
+            assertNotEquals(MarketResolver.UNCERTAIN_MESSAGE, message,
+                    "a definite refusal must not read like an unknown outcome");
         }
 
         @Test

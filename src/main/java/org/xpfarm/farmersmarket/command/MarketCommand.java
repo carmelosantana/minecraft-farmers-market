@@ -75,6 +75,12 @@ import org.xpfarm.farmersmarket.ledger.LedgerException;
  * either dupe the items or charge the player twice, so the command says plainly that it could
  * not confirm the result, logs the whole stack trace, and never retries.
  *
+ * <p>That unknown set is as narrow as the ledger can prove and no narrower. A storage failure
+ * that happened before the ledger attempted any write arrives as
+ * {@link LedgerException.Reason#NOTHING_WRITTEN} and is compensated like any other refusal --
+ * the depositing player gets their items back. A storage failure that might have committed is
+ * still unknown, and the items are still held.
+ *
  * <h2>Bedrock safety</h2>
  *
  * <p>All output is plain chat text with legacy-named colours. No hover events, no click events
@@ -244,7 +250,12 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                     }
                     if (failure instanceof LedgerException refused) {
                         // A refusal is definite: nothing was written, so the items are safe to
-                        // return.
+                        // return. That now includes Reason.NOTHING_WRITTEN -- a storage failure
+                        // the ledger can prove happened before it attempted any write, which
+                        // used to arrive as a bare SQLException and cost the player their
+                        // diamonds on the branch below. Widening this branch is only sound
+                        // because the ledger sets that reason from the pre-write read and
+                        // nowhere else.
                         giveOrDrop(id, where, moved);
                         message(id, text(MarketResolver.messageFor(refused.reason(), null)
                                 + " Your " + moved + " diamonds were returned.", NamedTextColor.RED));

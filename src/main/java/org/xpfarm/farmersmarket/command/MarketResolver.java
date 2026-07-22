@@ -299,6 +299,12 @@ public final class MarketResolver {
             case MALFORMED_AMOUNT -> "That is not a valid amount.";
             case AMOUNT_TOO_LARGE -> "That amount is too large.";
             case NEGATIVE_AMOUNT -> "Amount must be positive.";
+            // Deliberately definite where UNCERTAIN_MESSAGE is deliberately not: the ledger only
+            // reports this reason when it knows the write never started, so telling the player
+            // to go and check their balance would send them looking for a problem that is not
+            // there. "Nothing changed" is the whole difference between the two sentences.
+            case NOTHING_WRITTEN -> "The market could not be reached, so nothing was changed. "
+                    + "Try again in a moment.";
         };
     }
 

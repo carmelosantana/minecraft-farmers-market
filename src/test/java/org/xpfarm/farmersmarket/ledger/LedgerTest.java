@@ -20,10 +20,12 @@ import org.xpfarm.farmersmarket.storage.DatabaseExecutor;
 import org.xpfarm.farmersmarket.storage.Migrations;
 
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -276,6 +278,57 @@ class LedgerTest {
         assertEquals(0L, ledger.balance(BOB).get().dust());
     }
 
+    /**
+     * A storage failure on the balance read {@code deposit} performs before its write is a
+     * <em>refusal</em>, not an unknown outcome.
+     *
+     * <p>The command layer takes the player's diamonds out of their inventory before it credits
+     * them, and returns them only when the failure is a {@link LedgerException}. Before this
+     * reason existed, a read that threw arrived as a bare {@code SQLException} and the player's
+     * items were held indefinitely against the possibility that the credit had committed -- which
+     * a failed read cannot have done.
+     */
+    @Test
+    void aReadFailureBeforeTheWriteIsReportedAsARefusalWithNothingWritten() throws Exception {
+        execRaw("DROP TABLE accounts");
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> ledger.deposit(PLAYER, Diamonds.ofDiamonds(5)).get());
+
+        LedgerException refused = assertInstanceOf(LedgerException.class, thrown.getCause(),
+                "a failed read must be a typed refusal, not a raw SQLException");
+        assertEquals(LedgerException.Reason.NOTHING_WRITTEN, refused.reason());
+        assertInstanceOf(SQLException.class, refused.getCause(),
+                "the underlying storage failure must still be attached for the log");
+    }
+
+    /**
+     * The narrowing stops at the write, and this is the test that proves it did not leak.
+     *
+     * <p>A statement that reached the database may have committed and then failed on the way out.
+     * Reporting that as {@code NOTHING_WRITTEN} would have the command layer hand a depositing
+     * player their items back on top of a credit that landed, which mints diamonds. So a failure
+     * from here on stays a raw {@code SQLException} and the player keeps nothing back.
+     */
+    @Test
+    void aWriteFailureAfterASuccessfulReadStaysUnknownRatherThanClaimingNothingWasWritten()
+            throws Exception {
+        ledger.deposit(PLAYER, Diamonds.ofDiamonds(1)).get();
+        // Fires on the ON CONFLICT DO UPDATE branch of the upsert, i.e. after the read has
+        // already succeeded. There is no other way to fail a write on demand: AccountDao,
+        // Database, and DatabaseExecutor are all final.
+        execRaw("CREATE TRIGGER refuse_writes BEFORE UPDATE ON accounts "
+                + "BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END");
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> ledger.deposit(PLAYER, Diamonds.ofDiamonds(5)).get());
+
+        assertInstanceOf(SQLException.class, thrown.getCause(),
+                "a failure at or after the write must stay an unknown outcome");
+        assertFalse(thrown.getCause() instanceof LedgerException,
+                "a write that may have committed must never be reported as a refusal");
+    }
+
     @Test
     void mergeThatWouldOverflowIsRefusedAndLeavesBothAccountsAlone() throws Exception {
         seedRaw(FLOODGATE_UUID, Long.MAX_VALUE);
@@ -395,6 +448,16 @@ class LedgerTest {
     private void seedRow(AccountRow row) throws Exception {
         executor.submit(() -> {
             dao.upsertAccount(row);
+            return null;
+        }).get();
+    }
+
+    /** Runs one raw statement on the executor's thread, to break the schema on purpose. */
+    private void execRaw(String sql) throws Exception {
+        executor.submit(() -> {
+            try (var statement = database.connection().createStatement()) {
+                statement.execute(sql);
+            }
             return null;
         }).get();
     }

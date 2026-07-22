@@ -38,6 +38,14 @@ import org.xpfarm.farmersmarket.storage.DatabaseExecutor;
  * things thrown synchronously are {@link NullPointerException}s for null arguments, which are
  * programming errors rather than outcomes.
  *
+ * <p><b>The cause's type is the contract, and it says whether anything was written.</b> A
+ * {@link LedgerException} means the operation was <em>refused</em> and nothing in the database
+ * changed, so the caller may safely compensate -- hand the items back, drop them, keep them.
+ * Any other cause means the outcome is <em>unknown</em>, not failed: a commit followed by a
+ * failing cleanup moves the money and still throws. Nothing may be compensated there, in either
+ * direction. This class widens the first set only where it can prove the write never started;
+ * see {@link LedgerException.Reason#NOTHING_WRITTEN}.
+ *
  * <p>Accounts are keyed on UUID and never on username: Floodgate's username prefix is
  * configurable and Java names change, so a name-keyed balance is a balance waiting to be lost.
  *
@@ -82,22 +90,52 @@ public final class Ledger {
     /**
      * Adds {@code amount} to {@code player}'s balance.
      *
+     * <p><b>A failure of the balance read is reported as a refusal, not as an unknown outcome.</b>
+     * The read happens before the write is even prepared, so a {@link SQLException} out of it has
+     * provably changed nothing; it arrives as
+     * {@link LedgerException.Reason#NOTHING_WRITTEN}. That distinction is what lets the command
+     * layer hand a depositing player their items straight back instead of holding them pending a
+     * human. Everything from the write onwards keeps its raw {@link SQLException}, because a
+     * statement that may have committed is an unknown outcome and must stay one.
+     *
      * @param player the account to credit
      * @param amount the amount to add; must not be negative
      * @return a future completing with the new balance, or failing with a
      *         {@link LedgerException} whose reason is
-     *         {@link LedgerException.Reason#NEGATIVE_AMOUNT} or
-     *         {@link LedgerException.Reason#AMOUNT_TOO_LARGE}
+     *         {@link LedgerException.Reason#NEGATIVE_AMOUNT},
+     *         {@link LedgerException.Reason#AMOUNT_TOO_LARGE}, or
+     *         {@link LedgerException.Reason#NOTHING_WRITTEN}
      */
     public CompletableFuture<Diamonds> deposit(UUID player, Diamonds amount) {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(amount, "amount");
         return executor.submit(() -> {
             requireNonNegative(amount);
-            Diamonds updated = Diamonds.ofDust(accounts.balanceDust(player)).plus(amount);
+            Diamonds updated = readBeforeWriting(player).plus(amount);
             accounts.upsertBalance(player, updated.dust());
             return updated;
         });
+    }
+
+    /**
+     * The balance read that {@code deposit} performs before its write, with a storage failure
+     * converted into a {@link LedgerException.Reason#NOTHING_WRITTEN} refusal.
+     *
+     * <p><b>Only the read is inside the {@code try}, and that is the whole safety argument.</b>
+     * A failure here happened before any statement that could change a balance was even prepared,
+     * so "nothing was written" is a fact rather than an assumption. Widening this to cover the
+     * {@code upsertBalance} that follows would claim the same fact about a statement that may
+     * have committed and then failed on the way out -- and the command layer would return the
+     * player's items on top of a credit that landed. Never wrap a write in this.
+     */
+    private Diamonds readBeforeWriting(UUID player) {
+        try {
+            return Diamonds.ofDust(accounts.balanceDust(player));
+        } catch (SQLException readFailure) {
+            throw new LedgerException(LedgerException.Reason.NOTHING_WRITTEN,
+                    "could not read the balance of " + player + " before crediting it; the write "
+                            + "was never attempted", readFailure);
+        }
     }
 
     /**
