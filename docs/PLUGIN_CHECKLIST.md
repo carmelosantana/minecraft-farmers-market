@@ -404,15 +404,17 @@ carries them forward as real obligations rather than silence:
 Gate 8a complete `2026-07-21`. Gate 8b belongs to `minecraft-plugin-release`.
 
 - [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior. `.github/workflows/build.yml` was copied from `timber-blast` and verified **byte-identical** by `diff`, so it carries the corrected `SHA256SUMS.txt` generation that records bare filenames rather than `target/`-prefixed paths.
-- [ ] Successful main Actions run is recorded before tagging. Not this skill's box to tick — `minecraft-plugin-release` records it at gate 8b, against the commit actually being tagged. Evidence available for it: run `29886516873` on commit `1df4e6c`, `completed/success`, observed `2026-07-22`. That run built a scaffold with no production sources, so it is not evidence about the plugin; it only establishes that the workflow itself is sound.
+- [x] Successful main Actions run is recorded before tagging. Recorded at gate 8b on `2026-07-22`: the `main` run for commit **`f6143cc`** completed `success`, and that is the exact commit `v0.1.0` tags. The worktree was clean and `HEAD` matched at tag time. An earlier green run on `72bb3e9` was deliberately **not** tagged — a checklist correction landed after it, so tagging `72bb3e9` would have put the tag on a commit that was no longer `HEAD`, and tagging the new commit without re-verifying would have tagged something CI had never seen. The pipeline waited for the second run instead.
 - [x] Workflow permissions contain no broader access than the documented contract. `permissions: contents: write`, and nothing else.
 
 ## 9. Release
 
-- [ ] Semantic version matches the POM, plugin metadata, and `v<version>` tag.
-- [ ] Successful tag Actions run and GitHub release are recorded.
-- [ ] Release contains exactly one updater-matching JAR plus `SHA256SUMS.txt` and no `original-*` JAR.
-- [ ] Downloaded release assets pass `sha256sum --check SHA256SUMS.txt`.
+Gate 9 complete `2026-07-22`. Release: https://github.com/carmelosantana/minecraft-farmers-market/releases/tag/v0.1.0
+
+- [x] Semantic version matches the POM, plugin metadata, and `v<version>` tag. `pom.xml` `<version>0.1.0</version>`; the embedded `plugin.yml` in the shaded JAR reads `version: '0.1.0'` (Maven resource filtering, never hand-edited); tag `v0.1.0`. All three agree.
+- [x] Successful tag Actions run and GitHub release are recorded. Tag run on `f6143cc` completed `success`. The release is **stable and non-prerelease** (`isDraft=false`, `isPrerelease=false`), created by the workflow rather than by hand.
+- [x] Release contains exactly one updater-matching JAR plus `SHA256SUMS.txt` and no `original-*` JAR. Exactly two assets: `farmers-market-0.1.0.jar` (71,961 bytes) and `SHA256SUMS.txt` (91 bytes). Zero `original-*` entries.
+- [x] Downloaded release assets pass `sha256sum --check SHA256SUMS.txt`. Downloaded to a fresh flat directory and verified: `farmers-market-0.1.0.jar: OK`. The manifest records a bare filename, not a `target/`-prefixed path — the defect that made this check fail for every plugin released before `2026-07-19`.
 
 ## 10. Updater
 
