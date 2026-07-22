@@ -15,24 +15,37 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.logging.Logger;
 import java.util.stream.Stream;
 
+import org.bukkit.plugin.Plugin;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import org.xpfarm.farmersmarket.ledger.Ledger;
 import org.xpfarm.farmersmarket.ledger.LedgerException;
+import org.xpfarm.farmersmarket.storage.AccountDao;
+import org.xpfarm.farmersmarket.storage.Database;
+import org.xpfarm.farmersmarket.storage.DatabaseExecutor;
+import org.xpfarm.farmersmarket.storage.Migrations;
 
 /**
- * The two things in {@link MarketCommand} that do not need a running server.
+ * The parts of {@link MarketCommand} that do not need a running server: the two pure static
+ * seams, and how the command is wired at construction.
  *
  * <p>Everything else in that class -- dispatch, the scheduler hop, the inventory reads and
  * writes, and the compensation branches -- genuinely requires a live Paper server and is listed
- * for the runtime pass instead. This module has no mocking framework by design.
+ * for the runtime pass instead. This module has no mocking framework by design; where a Bukkit
+ * type is unavoidable it is a JDK dynamic proxy answering exactly the calls under test.
  */
 final class MarketCommandTest {
 
@@ -139,6 +152,61 @@ final class MarketCommandTest {
                 "must name the operation and the amount: " + line);
         assertFalse(line.contains("APPLIED"),
                 "a failure must not be reported as applied: " + line);
+    }
+
+    /**
+     * Every console line this class writes must go through the <em>plugin's</em> logger.
+     *
+     * <p>Paper prefixes a plugin logger's output with {@code [FarmersMarket]}; a plain
+     * {@code Logger.getLogger(MarketCommand.class.getName())} produces lines attributed to
+     * nothing an operator recognises. Every line this class writes is written because money may
+     * have moved, so attribution is not cosmetic -- during an incident it is the difference
+     * between a grep that finds the record and one that does not.
+     *
+     * <p>Driving this needs a {@code Plugin}, and this module has no mocking framework by design,
+     * so the plugin is a JDK dynamic proxy answering exactly one method. The ledger has to be
+     * real -- it is {@code final} -- which is why there is a database here at all; nothing in the
+     * test touches it.
+     */
+    @Test
+    void theCommandLogsThroughThePluginsOwnLoggerSoConsoleLinesCarryItsPrefix(@TempDir Path dir)
+            throws Exception {
+        Logger pluginLogger = Logger.getLogger("FarmersMarketTest-" + UUID.randomUUID());
+        Plugin plugin = pluginLoggingTo(pluginLogger);
+
+        try (Database database = Database.open(dir.resolve("market.db"), dir.resolve("tmp").toString(), 5000);
+                DatabaseExecutor executor = new DatabaseExecutor()) {
+            Migrations.applyTo(database.connection());
+            Ledger ledger = new Ledger(database, new AccountDao(database), executor);
+
+            MarketCommand command = new MarketCommand(plugin, ledger, List::of);
+
+            Field field = MarketCommand.class.getDeclaredField("log");
+            field.setAccessible(true);
+            assertSame(pluginLogger, field.get(command),
+                    "the command must log through plugin.getLogger(), which is the only logger "
+                            + "Paper prefixes with [FarmersMarket]");
+        }
+
+        for (Field field : MarketCommand.class.getDeclaredFields()) {
+            assertFalse(Modifier.isStatic(field.getModifiers()) && field.getType() == Logger.class,
+                    "a static logger cannot be the plugin's, so it cannot carry the prefix: "
+                            + field.getName());
+        }
+    }
+
+    /** A {@link Plugin} that answers {@code getLogger()} and nothing else. */
+    private static Plugin pluginLoggingTo(Logger logger) {
+        return (Plugin) Proxy.newProxyInstance(
+                MarketCommandTest.class.getClassLoader(),
+                new Class<?>[] {Plugin.class},
+                (proxy, method, args) -> {
+                    if ("getLogger".equals(method.getName())) {
+                        return logger;
+                    }
+                    throw new UnsupportedOperationException(
+                            "the constructor must not call " + method.getName());
+                });
     }
 
     /**
