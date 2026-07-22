@@ -761,6 +761,11 @@ git commit -m "feat(ledger): integer diamond ledger, atomic transfers, and XP ma
 - Consumes: `FmConfig`, `BukkitConfigSource`, `Database`, `Migrations`, `DatabaseExecutor`, `AccountDao`, `Ledger`, `Diamonds`, `LedgerException`, `EditionResolver`.
 - Produces: the plugin's runtime entry point. No later M1 task depends on it.
 
+**Correction from Task 4, supersedes the Task 4 interface block above:** `Ledger`'s constructor is
+`Ledger(Database, AccountDao, DatabaseExecutor)` — **three arguments, not two**. The two-arg form
+this plan originally specified could not satisfy the atomicity requirement, because `AccountDao`
+runs no transactions and exposes no connection. Wire all three.
+
 **Trim `plugin.yml` to what M1 actually implements.** Declaring commands and permissions for unbuilt features is a lie to operators. Remove `farmersmarket.vendor.place`, `farmersmarket.stall.rent`, `farmersmarket.chart`, `farmersmarket.admin.floor`, `farmersmarket.admin.audit`, `farmersmarket.admin.freeze`, `farmersmarket.admin.pot`, `farmersmarket.bypass.fees`, and `farmersmarket.bypass.buylimit`. Keep `farmersmarket.use`, `farmersmarket.admin`, and `farmersmarket.admin.reload`, and drop the removed children from the `farmersmarket.admin` `children:` block. Update the `usage:` string to `/market [balance | deposit | withdraw | reload]`. Later milestones re-add their own nodes.
 
 - [ ] **Step 1: Update `PluginDescriptorTest` first**
