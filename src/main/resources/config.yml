@@ -1,0 +1,107 @@
+# Farmers Market
+#
+# Every key is validated on load. An invalid value logs a warning and falls back to the default
+# documented here rather than failing plugin enable - except where noted as fail-closed, where an
+# unsafe or incomplete value refuses to load on purpose.
+#
+# Full rationale: docs/superpowers/specs/2026-07-21-farmers-market-design.md
+
+economy:
+  # Charged in XP at listing time, non-refundable. Discourages spam and speculative relisting.
+  listing-fee-percent: 1.0
+  # Charged in diamonds out of sale proceeds. Diamonds and XP each carry their own sink:
+  # this is the diamond one. Do not move it to XP without giving diamonds another sink.
+  sales-tax-percent: 7.0
+  # Share of collected tax destroyed outright. The remainder goes to the community pot.
+  tax-burn-share: 0.5
+  # Used only to price XP-denominated fees against a diamond-denominated listing.
+  # Not an exchange rate: XP is never transferable between players.
+  xp-per-diamond: 40
+  listing-duration-days: 14
+  max-listings-per-player: 40
+
+liquidity:
+  # A server counterparty that always buys, so a player can convert loot to currency even when
+  # nobody else is online. At this server's population, guaranteed liquidity beats perfect
+  # price discovery.
+  buyback-enabled: true
+
+  # Item key -> diamond price the server always pays.
+  buyback-floors: {}
+
+  # Item key -> estimated diamond cost of producing one unit VIA AN AUTOMATED FARM, not by hand.
+  # This is the denominator of the faucet check below. A buy-back floor at or above the real
+  # production cost is an infinite money faucet, and is the single most documented way a
+  # Minecraft server economy dies.
+  farm-output-costs: {}
+
+  # Refuses to load any floor priced at or above its farm-output-costs entry, AND refuses to load
+  # a floor whose item has no cost entry at all. Fail-closed: an item nobody has estimated is
+  # precisely the dangerous case. Disabling this logs a prominent warning at enable; it exists
+  # for testing, not for production.
+  farm-output-audit: true
+
+limits:
+  # Rolling per-item purchase caps. At this population, one player with capital IS the market,
+  # so cornering is the realistic threat model.
+  buy-limit-enabled: true
+  buy-limit-window-hours: 4
+  # Item key -> maximum quantity per window. Items not listed here are unlimited.
+  buy-limits: {}
+  # Playtime before market access unlocks. Raises the cost of a throwaway alt without
+  # pretending to defeat a determined one.
+  min-playtime-hours: 2
+
+vendor:
+  max-per-player: 2
+  # owned-and-district | district-only | anywhere
+  placement-mode: owned-and-district
+  min-distance-blocks: 24
+  # Spawns a TextDisplay above each vendor. Renders on Bedrock as plain floating nametag text -
+  # no background panel, no alignment. Label copy must read well that way.
+  label-enabled: true
+
+stalls:
+  enabled: true
+  # xp | diamonds
+  bid-currency: xp
+  # Sealed-bid resolution period. Bids are secret so nobody wins by +1; funds are taken at bid
+  # time so bids are real; ties break to the earliest bid.
+  bid-period-hours: 168
+  max-stalls-per-player: 1
+
+ui:
+  # density-4 | ramp-8
+  #
+  # density-4 uses the block characters confirmed present in Bedrock's CP437-derived glyph sheet.
+  # ramp-8 uses U+2581-U+2587, which are almost certainly ABSENT on Bedrock - unmapped codepoints
+  # there render as blank space rather than a visible error. Enabling ramp-8 requires shipping
+  # two hand-authored resource packs (a Java font and a Geyser-served Bedrock glyph override)
+  # and is deferred to v2. See the design doc for why this is a narrower win than it looks.
+  bar-glyphs: density-4
+
+  # Real charts render to map items, which is the only technique that produces genuine pixel
+  # graphics identically on Java and Bedrock.
+  charts-enabled: true
+  # Map redraw interval. Never per tick: per-viewer palette matching is the classic map-lag vector.
+  chart-refresh-seconds: 60
+  # Larger targets and fewer steps for Bedrock clients reporting InputMode.TOUCH.
+  bedrock-touch-simplify: true
+
+analytics:
+  # Item keys in the Laspeyres basket for the Server Market Index. Empty disables the index.
+  # The index reads flat and useless while most prices are server-fixed; it only earns its keep
+  # once player prices genuinely float.
+  index-basket: []
+  # Median-absolute-deviation multiplier for excluding outlier trades from published prices.
+  # A published median becomes the market price, so filtering is a correctness requirement.
+  outlier-filter-mad: 3.0
+  # Daily rollups are pruned past this age. Raw trades are never pruned.
+  history-retention-days: 365
+
+storage:
+  # sqlite-jdbc extracts a native library into java.io.tmpdir at class load. A container with
+  # /tmp mounted noexec fails with UnsatisfiedLinkError. Set explicitly rather than debugged
+  # in production.
+  sqlite-tmpdir: plugins/FarmersMarket/tmp
+  busy-timeout-ms: 5000

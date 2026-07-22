@@ -1,0 +1,67 @@
+name: FarmersMarket
+version: '${project.version}'
+main: org.xpfarm.farmersmarket.FarmersMarketPlugin
+api-version: '26.1'
+author: Carmelo Santana
+website: https://xpfarm.org
+description: Player-run market economy where diamonds buy goods, XP pays the fees, and vendors shaped like wandering traders sell your stock around the clock
+
+# Floodgate is reached reflectively and is never on the compile classpath. Declared here purely
+# for load ordering; every failure in the reflective chain resolves the player to Java edition.
+softdepend: [Floodgate]
+
+# The SQLite JDBC driver is loaded at runtime rather than shaded. Paper still bundles
+# org.xerial:sqlite-jdbc, but its own build file marks that as legacy and "eventually to be
+# removed", so the plugin owns its driver. Version pending confirmation at gate 4.
+libraries:
+  - org.xerial:sqlite-jdbc:3.53.2.0
+
+commands:
+  market:
+    description: Browse, buy, sell, and manage your market vendors
+    usage: /market [browse | sell | orders | buy | balance | deposit | withdraw | chart | index | vendor | stall | admin]
+    aliases: [mkt, fm]
+
+permissions:
+  farmersmarket.use:
+    description: Browse, buy, sell, deposit, and withdraw
+    default: true
+  farmersmarket.vendor.place:
+    description: Place a stationary market vendor
+    default: true
+  farmersmarket.stall.rent:
+    description: Bid on a market-town stall
+    default: true
+  farmersmarket.chart:
+    description: Request a rendered map price chart
+    default: true
+  farmersmarket.admin:
+    description: All Farmers Market administration
+    default: op
+    children:
+      farmersmarket.admin.reload: true
+      farmersmarket.admin.floor: true
+      farmersmarket.admin.audit: true
+      farmersmarket.admin.freeze: true
+      farmersmarket.admin.pot: true
+  farmersmarket.admin.reload:
+    description: Reload the Farmers Market configuration
+    default: op
+  farmersmarket.admin.floor:
+    description: Set or clear a server buy-back floor
+    default: op
+  farmersmarket.admin.audit:
+    description: Read the immutable trade log
+    default: op
+  farmersmarket.admin.freeze:
+    description: Suspend trading on a single item
+    default: op
+  farmersmarket.admin.pot:
+    description: View and disburse the community tax pot
+    default: op
+  farmersmarket.bypass.fees:
+    description: Waive listing fees and sales tax - staff and testing only
+    default: false
+  farmersmarket.bypass.buylimit:
+    description: Waive rolling per-item buy limits - staff and testing only
+    default: false

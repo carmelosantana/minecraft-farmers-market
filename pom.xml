@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>org.xpfarm</groupId>
+    <artifactId>farmers-market</artifactId>
+    <version>0.1.0</version>
+    <packaging>jar</packaging>
+
+    <licenses>
+        <license>
+            <name>GNU Affero General Public License v3.0 or later</name>
+            <url>https://www.gnu.org/licenses/agpl-3.0.html</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <name>FarmersMarket</name>
+    <description>Player-run market economy where diamonds buy goods, XP pays the fees, and vendors shaped like wandering traders sell your stock around the clock</description>
+    <url>https://xpfarm.org</url>
+
+    <developers>
+        <developer>
+            <name>Carmelo Santana</name>
+            <url>https://xpfarm.org</url>
+        </developer>
+    </developers>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <repositories>
+        <repository>
+            <id>central</id>
+            <url>https://repo.maven.apache.org/maven2</url>
+        </repository>
+        <repository>
+            <id>papermc-repo</id>
+            <url>https://repo.papermc.io/repository/maven-public/</url>
+        </repository>
+        <repository>
+            <id>sonatype</id>
+            <url>https://oss.sonatype.org/content/groups/public/</url>
+        </repository>
+        <!--
+            Floodgate's API. Soft dependency, provided scope, never shaded: the plugin reaches it
+            reflectively at runtime and resolves every player to Java edition when it is absent.
+            See docs/superpowers/specs/2026-07-21-farmers-market-design.md §7.
+        -->
+        <repository>
+            <id>opencollab</id>
+            <url>https://repo.opencollab.dev/main/</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.papermc.paper</groupId>
+            <artifactId>paper-api</artifactId>
+            <version>26.1.2.build.74-stable</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.0</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.1</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.2</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <!--
+                                The SQLite JDBC driver is declared in plugin.yml `libraries:` and is
+                                deliberately NOT shaded. If that ever changes, org.sqlite.* must not
+                                be relocated - relocation breaks the driver's reflective and JNI
+                                paths (xerial/sqlite-jdbc#145).
+                            -->
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
+    </build>
+</project>
