@@ -159,6 +159,20 @@ class FmConfigTest {
         assertEquals(1, warnings.stream().filter(w -> w.contains("farm-output-audit")).count());
     }
 
+    /**
+     * Pins a deliberate decision, not an accident of control flow: with no floors configured
+     * at all, disabling the audit has nothing to warn about. No floors means no faucet risk.
+     */
+    @Test
+    void auditDisabledWithNoFloorsIsSilent() {
+        List<String> warnings = new ArrayList<>();
+        FmConfig config = FmConfig.load(new MapConfigSource(Map.of(
+                "liquidity.farm-output-audit", false)), warnings::add);
+
+        assertTrue(config.buybackFloors().isEmpty());
+        assertTrue(warnings.isEmpty(), () -> "no floors means nothing to warn about, got " + warnings);
+    }
+
     @Test
     void nonPositiveFarmOutputCostEntryIsDroppedAndWarned() {
         List<String> warnings = new ArrayList<>();

@@ -77,7 +77,13 @@ public final class BukkitConfigSource implements ConfigSource {
 
     @Override
     public List<String> getStringList(String path) {
-        return section == null ? List.of() : section.getStringList(path);
+        if (section == null) {
+            return List.of();
+        }
+        if (rejectMismatch(path, List.class, List.of())) {
+            return List.of();
+        }
+        return section.getStringList(path);
     }
 
     @Override
@@ -93,8 +99,10 @@ public final class BukkitConfigSource implements ConfigSource {
     /**
      * Reads the child section at {@code path} and coerces each entry's value with
      * {@code coerce}, skipping entries {@code coerce} maps to {@code null} -- e.g. a
-     * non-numeric value in an item-price map. An absent or empty section yields an empty
-     * map. Never {@code null}.
+     * non-numeric value in an item-price map. An absent path yields an empty map silently, but
+     * a path that is <em>present</em> and not itself a map/section (an operator typing a
+     * scalar where a map belongs) warns exactly like a scalar type mismatch before falling
+     * back to the empty map. Never {@code null}.
      */
     private <T> Map<String, T> coerceMap(String path, Function<Object, T> coerce) {
         if (section == null) {
@@ -102,6 +110,7 @@ public final class BukkitConfigSource implements ConfigSource {
         }
         ConfigurationSection child = section.getConfigurationSection(path);
         if (child == null) {
+            rejectMismatch(path, ConfigurationSection.class, Map.of());
             return Map.of();
         }
         Map<String, T> result = new LinkedHashMap<>();

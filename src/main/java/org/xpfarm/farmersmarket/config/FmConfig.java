@@ -383,6 +383,10 @@ public final class FmConfig {
     /**
      * Applies the buy-back faucet audit described on {@link #load}. Returns only the
      * surviving floor entries.
+     *
+     * <p>Deliberately silent when {@code rawFloors} is empty, even if the audit itself is
+     * disabled: no floors means no faucet risk, so there is nothing for the audit to warn
+     * about. Pinned by {@code auditDisabledWithNoFloorsIsSilent}.
      */
     private static Map<String, Double> resolveBuybackFloors(Map<String, Double> rawFloors,
             Map<String, Double> farmOutputCosts, boolean auditEnabled, Consumer<String> warn) {
