@@ -411,7 +411,7 @@ Test it: submit 100 increments of a shared counter, close, assert the counter is
 
 Cover: unknown UUID reads zero; upsert then read round-trips; upsert twice updates rather than duplicating; a negative balance is rejected by the CHECK constraint; a link inserts and reads back.
 
-Run: `mvn --batch-mode --no-transfer-progress test -Dtest='MigrationsTest+AccountDaoTest+DatabaseExecutorTest'`
+Run: `mvn --batch-mode --no-transfer-progress test -Dtest='MigrationsTest,AccountDaoTest,DatabaseExecutorTest'`
 Expected: PASS.
 
 - [ ] **Step 9: Commit**
@@ -482,7 +482,7 @@ Mirror `magic-carpet`'s `EditionResolverTest`: assert `alwaysJava()` reports eve
 
 - [ ] **Step 3: Run to verify failure**
 
-Run: `mvn --batch-mode --no-transfer-progress test -Dtest='AccountMergeTest+EditionResolverTest'`
+Run: `mvn --batch-mode --no-transfer-progress test -Dtest='AccountMergeTest,EditionResolverTest'`
 Expected: FAIL — classes do not exist.
 
 - [ ] **Step 4: Implement both classes**
@@ -491,7 +491,7 @@ Expected: FAIL — classes do not exist.
 
 - [ ] **Step 5: Run to verify pass**
 
-Run: `mvn --batch-mode --no-transfer-progress test -Dtest='AccountMergeTest+EditionResolverTest'`
+Run: `mvn --batch-mode --no-transfer-progress test -Dtest='AccountMergeTest,EditionResolverTest'`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -728,7 +728,7 @@ about balances and amounts, and no `Diamonds` value is involved here.
 
 - [ ] **Step 4: Run all three to verify failure**
 
-Run: `mvn --batch-mode --no-transfer-progress test -Dtest='DiamondsTest+LedgerTest+ExperienceMathTest'`
+Run: `mvn --batch-mode --no-transfer-progress test -Dtest='DiamondsTest,LedgerTest,ExperienceMathTest'`
 Expected: FAIL — classes do not exist.
 
 - [ ] **Step 5: Implement all four classes**
@@ -737,7 +737,7 @@ Expected: FAIL — classes do not exist.
 
 - [ ] **Step 6: Run to verify pass**
 
-Run: `mvn --batch-mode --no-transfer-progress test -Dtest='DiamondsTest+LedgerTest+ExperienceMathTest'`
+Run: `mvn --batch-mode --no-transfer-progress test -Dtest='DiamondsTest,LedgerTest,ExperienceMathTest'`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
