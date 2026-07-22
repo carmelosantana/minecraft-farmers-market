@@ -61,8 +61,11 @@ public final class LedgerException extends RuntimeException {
          * anything not provably pre-write stays an ordinary {@code SQLException} and reaches the
          * player as an unknown outcome, with the items held and a log line for a human.
          *
-         * <p>Today exactly one site qualifies: the balance {@code SELECT} that {@code deposit}
-         * runs before its {@code UPDATE}. A read that throws has written nothing.
+         * <p>Today exactly one kind of site qualifies: the balance {@code SELECT} that
+         * {@code deposit} and {@code withdraw} each run before their {@code UPDATE}. A read that
+         * throws has written nothing. Both operations answer that question through the same
+         * method, on purpose -- two paths answering "was anything written?" differently is the
+         * shape that produced this plugin's one money-creation bug.
          */
         NOTHING_WRITTEN
     }

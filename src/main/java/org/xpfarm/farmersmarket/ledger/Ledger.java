@@ -111,6 +111,9 @@ public final class Ledger {
         Objects.requireNonNull(amount, "amount");
         return executor.submit(() -> {
             requireNonNegative(amount);
+            // One policy, stated once in readBeforeWriting and applied identically by withdraw:
+            // a failure of this read is a definite refusal, everything from the write onwards is
+            // an unknown outcome.
             Diamonds updated = readBeforeWriting(player).plus(amount);
             accounts.upsertBalance(player, updated.dust());
             return updated;
@@ -118,22 +121,39 @@ public final class Ledger {
     }
 
     /**
-     * The balance read that {@code deposit} performs before its write, with a storage failure
-     * converted into a {@link LedgerException.Reason#NOTHING_WRITTEN} refusal.
+     * The balance read that a single-account operation performs before its write, with a storage
+     * failure converted into a {@link LedgerException.Reason#NOTHING_WRITTEN} refusal.
+     *
+     * <p><b>This is the one place the pre-write question is answered, and both {@link #deposit}
+     * and {@link #withdraw} route through it.</b> Two operations answering "was anything written?"
+     * in different ways, forty lines apart, is the shape that already cost this plugin once: the
+     * whole-branch review found {@code deposit} and {@code deliver} answering the same
+     * items-moved-outcome-unknown question in opposite directions, each locally defensible, and
+     * together able to mint diamonds. There is one answer here, and it is the same answer for
+     * every caller.
      *
      * <p><b>Only the read is inside the {@code try}, and that is the whole safety argument.</b>
      * A failure here happened before any statement that could change a balance was even prepared,
      * so "nothing was written" is a fact rather than an assumption. Widening this to cover the
      * {@code upsertBalance} that follows would claim the same fact about a statement that may
-     * have committed and then failed on the way out -- and the command layer would return the
-     * player's items on top of a credit that landed. Never wrap a write in this.
+     * have committed and then failed on the way out -- and the command layer would compensate on
+     * top of a write that landed. Never wrap a write in this.
+     *
+     * <p><b>Not used by {@link #transfer} or {@link #mergeAccounts}, deliberately.</b> Their reads
+     * happen inside a transaction, where a failure is entangled with the rollback and the
+     * autocommit restore that follow it -- a rollback that itself fails is followed by a
+     * restore the driver implements as a {@code COMMIT}. Only the first read of those operations
+     * is provably pre-write, and neither has a caller that compensates on the answer, so they keep
+     * their raw {@link SQLException} and stay unknown. Unknown is always the safe direction: it
+     * compensates nothing and can therefore never dupe. If M2 gives them a compensating caller,
+     * the narrowing has to be worked out per statement, not copied.
      */
     private Diamonds readBeforeWriting(UUID player) {
         try {
             return Diamonds.ofDust(accounts.balanceDust(player));
         } catch (SQLException readFailure) {
             throw new LedgerException(LedgerException.Reason.NOTHING_WRITTEN,
-                    "could not read the balance of " + player + " before crediting it; the write "
+                    "could not read the balance of " + player + " before writing it; the write "
                             + "was never attempted", readFailure);
         }
     }
@@ -145,20 +165,32 @@ public final class Ledger {
      * caller is about to hand the player physical diamonds, and a partial withdrawal it did not
      * ask for would hand over the wrong number of them.
      *
+     * <p><b>The balance read is answered exactly as {@link #deposit}'s is.</b> A failure of it
+     * happened before the debit was attempted, so nothing left the player's balance and nothing
+     * left their inventory either; it arrives as
+     * {@link LedgerException.Reason#NOTHING_WRITTEN}, a definite refusal. Telling that player the
+     * outcome was uncertain and sending them to check a balance that provably did not move is
+     * both false and corrosive -- it is the same message the genuinely ambiguous case needs to be
+     * believed. Everything from the debit onwards keeps its raw {@link SQLException} and stays
+     * unknown.
+     *
      * @param player the account to debit
      * @param amount the amount to remove; must not be negative
      * @return a future completing with the new balance, or failing with a
      *         {@link LedgerException} whose reason is
      *         {@link LedgerException.Reason#NEGATIVE_AMOUNT},
-     *         {@link LedgerException.Reason#INSUFFICIENT_FUNDS}, or
-     *         {@link LedgerException.Reason#AMOUNT_TOO_LARGE}
+     *         {@link LedgerException.Reason#INSUFFICIENT_FUNDS},
+     *         {@link LedgerException.Reason#AMOUNT_TOO_LARGE}, or
+     *         {@link LedgerException.Reason#NOTHING_WRITTEN}
      */
     public CompletableFuture<Diamonds> withdraw(UUID player, Diamonds amount) {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(amount, "amount");
         return executor.submit(() -> {
             requireNonNegative(amount);
-            Diamonds held = Diamonds.ofDust(accounts.balanceDust(player));
+            // The same one policy deposit applies, through the same method: this read failing is
+            // a definite refusal, the debit below failing is an unknown outcome.
+            Diamonds held = readBeforeWriting(player);
             Diamonds remaining = held.minus(amount);
             if (remaining.isNegative()) {
                 throw insufficient(player, held, amount);

@@ -119,16 +119,6 @@ class LedgerTest {
         assertEquals(1, dao.allLinks().size());
     }
 
-    @Test
-    void mergeIsIdempotentAndDoesNotDoubleCredit() throws Exception {
-        ledger.deposit(FLOODGATE_UUID, Diamonds.ofDiamonds(12)).get();
-
-        ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 1L).get();
-        ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 2L).get();
-
-        assertEquals(12_000L, ledger.balance(JAVA_UUID).get().dust());
-    }
-
     // --- Beyond the brief -----------------------------------------------------------------
 
     /**
@@ -329,6 +319,51 @@ class LedgerTest {
                 "a write that may have committed must never be reported as a refusal");
     }
 
+    /**
+     * {@code withdraw} answers the pre-write question exactly as {@code deposit} does.
+     *
+     * <p>It debits before it hands anything over, so a failure of the read that precedes the debit
+     * means the balance did not move and no diamonds left the ledger. That is a definite refusal.
+     * Reporting it as an unknown outcome would tell the player to go and check a balance that
+     * provably did not change -- and every such false alarm makes the same message less believable
+     * in the genuinely ambiguous case, which is the case where it has to be believed.
+     */
+    @Test
+    void aReadFailureBeforeTheDebitIsReportedAsARefusalWithNothingWritten() throws Exception {
+        execRaw("DROP TABLE accounts");
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> ledger.withdraw(PLAYER, Diamonds.ofDiamonds(5)).get());
+
+        LedgerException refused = assertInstanceOf(LedgerException.class, thrown.getCause(),
+                "withdraw must answer a failed pre-write read exactly as deposit does");
+        assertEquals(LedgerException.Reason.NOTHING_WRITTEN, refused.reason());
+        assertInstanceOf(SQLException.class, refused.getCause(),
+                "the underlying storage failure must still be attached for the log");
+    }
+
+    /**
+     * And the narrowing stops at the debit, exactly as it stops at the credit on the deposit side.
+     *
+     * <p>A debit that reached the database may have committed and then failed on the way out. The
+     * command layer must not hand over diamonds on that outcome, so it must not see a refusal.
+     */
+    @Test
+    void aDebitFailureAfterASuccessfulReadStaysUnknownRatherThanClaimingNothingWasWritten()
+            throws Exception {
+        ledger.deposit(PLAYER, Diamonds.ofDiamonds(10)).get();
+        execRaw("CREATE TRIGGER refuse_writes BEFORE UPDATE ON accounts "
+                + "BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END");
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> ledger.withdraw(PLAYER, Diamonds.ofDiamonds(5)).get());
+
+        assertInstanceOf(SQLException.class, thrown.getCause(),
+                "a failure at or after the debit must stay an unknown outcome");
+        assertFalse(thrown.getCause() instanceof LedgerException,
+                "a debit that may have committed must never be reported as a refusal");
+    }
+
     @Test
     void mergeThatWouldOverflowIsRefusedAndLeavesBothAccountsAlone() throws Exception {
         seedRaw(FLOODGATE_UUID, Long.MAX_VALUE);
@@ -368,19 +403,37 @@ class LedgerTest {
     }
 
     /**
-     * The second merge is a no-op because a link row already exists, not because the balances
-     * happened to work out -- so a balance earned on the Bedrock UUID after the first merge stays
-     * where it is rather than being swept a second time.
+     * The merge is idempotent <em>because of the link row</em>, and this is the test that proves
+     * it: a second merge neither sweeps the Floodgate account again nor double-credits the Java
+     * one.
+     *
+     * <p>It replaces an M1 test named {@code mergeIsIdempotentAndDoesNotDoubleCredit} that merged
+     * twice in a row and asserted the Java balance had not doubled. That test could not fail:
+     * the first merge deletes the Floodgate row, so the second one sums zero into the survivor
+     * and lands on the same number whether the link check runs or not. Deleting {@code findLink}'s
+     * answer entirely left it green. <b>The balance earned on the old UUID between the two merges
+     * is the whole mechanism</b> -- without it there is nothing a second sweep could move, and
+     * therefore nothing the assertion can see.
+     *
+     * <p>The first merge here moves a real balance, so this also pins that the no-op is a no-op
+     * and not simply a merge that never worked.
      */
     @Test
-    void mergeAfterTheLinkExistsLeavesTheFloodgateAccountUntouched() throws Exception {
+    void mergeIsIdempotentByItsLinkRowSoASecondMergeNeitherSweepsNorDoubleCredits() throws Exception {
+        ledger.deposit(FLOODGATE_UUID, Diamonds.ofDiamonds(12)).get();
         ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 1L).get();
+        assertEquals(12_000L, ledger.balance(JAVA_UUID).get().dust(), "the first merge must sweep");
+
+        // Earned on the Bedrock UUID after linking. This is what a second sweep would move, and
+        // what a second credit would double.
         ledger.deposit(FLOODGATE_UUID, Diamonds.ofDiamonds(4)).get();
 
         ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 2L).get();
 
-        assertEquals(4_000L, ledger.balance(FLOODGATE_UUID).get().dust());
-        assertEquals(0L, ledger.balance(JAVA_UUID).get().dust());
+        assertEquals(12_000L, ledger.balance(JAVA_UUID).get().dust(),
+                "a second merge must not credit the Java account again");
+        assertEquals(4_000L, ledger.balance(FLOODGATE_UUID).get().dust(),
+                "a second merge must not sweep the Floodgate account again");
         assertEquals(1, dao.allLinks().size());
     }
 

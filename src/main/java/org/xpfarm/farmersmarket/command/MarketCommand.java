@@ -75,11 +75,13 @@ import org.xpfarm.farmersmarket.ledger.LedgerException;
  * either dupe the items or charge the player twice, so the command says plainly that it could
  * not confirm the result, logs the whole stack trace, and never retries.
  *
- * <p>That unknown set is as narrow as the ledger can prove and no narrower. A storage failure
- * that happened before the ledger attempted any write arrives as
- * {@link LedgerException.Reason#NOTHING_WRITTEN} and is compensated like any other refusal --
- * the depositing player gets their items back. A storage failure that might have committed is
- * still unknown, and the items are still held.
+ * <p>That unknown set is as narrow as the ledger can prove and no narrower, and it is the same
+ * width for every operation. A storage failure that happened before the ledger attempted any
+ * write arrives as {@link LedgerException.Reason#NOTHING_WRITTEN} and is compensated like any
+ * other refusal -- the depositing player gets their items back, and the withdrawing player is
+ * told plainly that nothing changed rather than being sent to check a balance that provably did
+ * not move. A storage failure that might have committed is still unknown in both, and the items
+ * are still held.
  *
  * <h2>Bedrock safety</h2>
  *
@@ -319,7 +321,10 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                     if (failure instanceof LedgerException refused) {
                         // A refusal means the debit never happened, so there is nothing to undo.
                         // The balance is only re-read to fill in the number the player wants to
-                        // hear.
+                        // hear. That now includes Reason.NOTHING_WRITTEN on exactly the same
+                        // terms as the deposit branch above: a failed pre-write read is a
+                        // definite refusal in both operations, because it is answered in one
+                        // place -- Ledger.readBeforeWriting -- for both of them.
                         explainRefusedWithdrawal(id, refused);
                         return;
                     }
