@@ -89,6 +89,10 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
         config.set(loadConfig(this::warn));
 
         Path databaseFile = getDataFolder().toPath().resolve(DATABASE_FILE);
+
+        // Names whatever is being attempted right now, so the failure below can say where it
+        // died instead of just that it did.
+        String stage = "opening its database at " + databaseFile;
         try {
             Files.createDirectories(getDataFolder().toPath());
             String tmpdir = resolveTmpdir(config.get().sqliteTmpdir());
@@ -96,29 +100,40 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
             int schemaVersion = Migrations.applyTo(database.connection());
             getLogger().info("FarmersMarket: database ready at " + databaseFile
                     + " (schema version " + schemaVersion + ").");
+
+            stage = "starting its database writer thread";
             executor = new DatabaseExecutor();
             ledger = new Ledger(database, new AccountDao(database), executor);
+
+            // Inside the try, not after it. EditionResolver.create catches
+            // ReflectiveOperationException and RuntimeException but not Error, so a
+            // NoClassDefFoundError from a half-installed Floodgate escapes it -- and by this
+            // point JavaPlugin has already flipped itself to enabled, which would leave the
+            // plugin nominally running with an open database, no command executor, and no
+            // listener. The same argument covers every step below.
+            stage = "detecting Bedrock players through Floodgate";
+            editions = EditionResolver.create(getLogger());
+
+            stage = "registering the /market command";
+            PluginCommand command = getCommand("market");
+            if (command == null) {
+                throw new IllegalStateException("the 'market' command is missing from plugin.yml, "
+                        + "so there is no way to reach anything this plugin does");
+            }
+            MarketCommand market = new MarketCommand(this, ledger, this::reload);
+            command.setExecutor(market);
+            command.setTabCompleter(market);
+
+            stage = "registering its player-join listener";
+            getServer().getPluginManager().registerEvents(this, this);
         } catch (Throwable t) {
             // Throwable, not Exception: an UnsatisfiedLinkError from sqlite-jdbc failing to
             // extract its native library into a noexec tmpdir is an Error, and it is the single
             // most likely way this fails in a container.
-            failToEnable("could not open its database at " + databaseFile, t);
+            failToEnable(stage, t);
             return;
         }
 
-        editions = EditionResolver.create(getLogger());
-
-        PluginCommand command = getCommand("market");
-        if (command == null) {
-            failToEnable("the 'market' command is missing from plugin.yml, so there is no way to "
-                    + "reach anything this plugin does", null);
-            return;
-        }
-        MarketCommand market = new MarketCommand(this, ledger, this::reload);
-        command.setExecutor(market);
-        command.setTabCompleter(market);
-
-        getServer().getPluginManager().registerEvents(this, this);
         getLogger().info("FarmersMarket enabled.");
     }
 
@@ -256,22 +271,22 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * Logs why the plugin is refusing to run, closes whatever was already opened, and disables
-     * it.
+     * Logs which startup stage failed, closes whatever was already opened, and disables the
+     * plugin.
      *
-     * <p>{@link #onDisable} is idempotent and null-guarded, so calling
-     * {@code shutdownStorage()}-equivalent cleanup here and having Paper call {@code onDisable}
-     * again on the way out is safe rather than a double close.
+     * <p>{@link #onDisable} is idempotent and null-guarded, so closing here and having Paper call
+     * {@code onDisable} again on the way out is safe rather than a double close.
+     *
+     * @param stage what was being attempted, phrased to follow "failed while"
+     * @param cause the failure; a {@link Throwable} rather than an {@link Exception} because an
+     *              {@code UnsatisfiedLinkError} or {@code NoClassDefFoundError} is exactly the
+     *              kind of thing that reaches here
      */
-    private void failToEnable(String what, Throwable cause) {
-        String message = "FarmersMarket: " + what + ". Refusing to enable -- every command this "
-                + "plugin has moves diamonds through that database, and a plugin that enables "
-                + "without one answers every command with a stack trace.";
-        if (cause == null) {
-            getLogger().severe(message);
-        } else {
-            getLogger().log(Level.SEVERE, message, cause);
-        }
+    private void failToEnable(String stage, Throwable cause) {
+        getLogger().log(Level.SEVERE, "FarmersMarket: failed while " + stage + ". Refusing to "
+                + "enable -- every command this plugin has moves diamonds through its database, "
+                + "and a plugin that enables half-wired answers those commands with a stack "
+                + "trace instead.", cause);
         onDisable();
         getServer().getPluginManager().disablePlugin(this);
     }
