@@ -138,11 +138,12 @@ public final class Ledger {
      * because the database refuses the write -- rolls the debit back with it. The total held
      * across both accounts is identical before and after a failed transfer, to the dust.
      *
-     * <p>A transfer to oneself does nothing and succeeds. It cannot be implemented as a real
-     * debit and credit: reading both balances and writing both back would have the credit
-     * overwrite the debit and hand the sender {@code amount} for free. Task 5 should still
-     * reject paying yourself at the command layer, because a silent success is a confusing
-     * answer to a command a player did not mean to type.
+     * <p>A transfer to oneself short-circuits before anything is read, and does nothing. Run
+     * through the real path it would debit and then credit the same row, and while the debit-first
+     * ordering happens to leave the balance intact, it would also refuse a self-transfer larger
+     * than the balance for no reason and would mint outright under any other ordering. Task 5
+     * should still reject paying yourself at the command layer, because a silent success is a
+     * confusing answer to a command a player did not mean to type.
      *
      * @param from   the account to debit
      * @param to     the account to credit
@@ -238,28 +239,55 @@ public final class Ledger {
      * Runs {@code work} inside one SQL transaction on the connection's own thread, committing on
      * success and rolling back on any failure whatsoever.
      *
-     * <p>Autocommit is restored to whatever it was on the way out, success or failure, so this
-     * never leaves the shared connection in a mode a later caller did not expect. A rollback
-     * that itself fails is attached to the original failure as a suppressed exception rather
-     * than replacing it -- the first failure is the one worth reading.
+     * <p><b>{@code Throwable}, not {@code Exception}, and that distinction is money.</b> An
+     * {@link Error} -- an {@link OutOfMemoryError} between a transfer's debit and its credit, say
+     * -- would skip a narrower {@code catch}, and restoring autocommit on the way out is
+     * implemented by the driver as a {@code COMMIT} of the still-open transaction. The debit
+     * would be committed with no credit and the player's diamonds destroyed, with nothing but an
+     * exceptionally-completed future to show for it, because {@link DatabaseExecutor#submit}
+     * catches {@code Throwable} and the writer thread survives. Every failure rolls back here,
+     * and every failure is rethrown -- an {@code Error} is never swallowed.
+     *
+     * <p>Autocommit is restored on the way out, success or failure, so this never leaves the
+     * shared connection in a mode a later caller did not expect. Neither the rollback nor that
+     * restoration may replace the failure that caused them: the caller switches on
+     * {@link LedgerException#reason()} to choose what to tell the player, and a {@link SQLException}
+     * thrown out of cleanup would hide it. Both are attached to the original as suppressed
+     * exceptions instead. On the success path there is no original to hide, so a failed
+     * restoration propagates rather than leaving the connection silently stuck outside autocommit.
+     *
+     * <p>Package-private rather than private purely so {@code LedgerTest} can drive a failure that
+     * is not an {@code Exception} through it. There is no other way to reach that path -- the
+     * classes this method calls into are all {@code final} -- and the alternative is a guarantee
+     * about player money that nothing verifies. It is the narrowest seam that does the job: no
+     * production caller outside this class exists, and the behaviour is identical either way.
      */
-    private <T> T inTransaction(Callable<T> work) throws Exception {
+    <T> T inTransaction(Callable<T> work) throws Exception {
         Connection connection = database.connection();
         boolean previousAutoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
+        Throwable failure = null;
         try {
             T result = work.call();
             connection.commit();
             return result;
-        } catch (Exception e) {
+        } catch (Throwable t) {
+            failure = t;
             try {
                 connection.rollback();
             } catch (SQLException rollbackFailure) {
-                e.addSuppressed(rollbackFailure);
+                t.addSuppressed(rollbackFailure);
             }
-            throw e;
+            throw t;
         } finally {
-            connection.setAutoCommit(previousAutoCommit);
+            try {
+                connection.setAutoCommit(previousAutoCommit);
+            } catch (SQLException restoreFailure) {
+                if (failure == null) {
+                    throw restoreFailure;
+                }
+                failure.addSuppressed(restoreFailure);
+            }
         }
     }
 

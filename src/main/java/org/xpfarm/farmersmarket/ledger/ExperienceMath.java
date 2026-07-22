@@ -52,9 +52,11 @@ public final class ExperienceMath {
      * @return the total points; exact, never an estimate
      * @throws IllegalArgumentException if {@code level} is negative, or {@code progress} is
      *                                   outside {@code [0, 1]}, {@code NaN}, or infinite
-     * @throws ArithmeticException      if the total for {@code level} does not fit in an
-     *                                   {@code int}, which no reachable player level can cause;
-     *                                   refused rather than silently wrapped
+     * @throws ArithmeticException      if the total does not fit in an {@code int}, which no
+     *                                   reachable player level can cause; refused rather than
+     *                                   silently wrapped, both for a level whose cumulative total
+     *                                   alone overflows and for the boundary level where only the
+     *                                   added progress tips it over
      */
     public static int totalPoints(int level, float progress) {
         requireLevel(level);
@@ -62,7 +64,10 @@ public final class ExperienceMath {
             throw new IllegalArgumentException("progress must be between 0 and 1, got " + progress);
         }
         int base = Math.toIntExact(cumulativePoints(level));
-        return base + Math.round(progress * costOfNextLevel(level));
+        // addExact, not +, and the two guards catch different levels: toIntExact above catches a
+        // level whose own cumulative total does not fit, while this catches the last level that
+        // does fit but overflows once a full bar of progress is added to it.
+        return Math.addExact(base, Math.round(progress * costOfNextLevel(level)));
     }
 
     /**

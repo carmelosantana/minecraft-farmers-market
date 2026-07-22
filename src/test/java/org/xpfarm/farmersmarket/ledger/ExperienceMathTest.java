@@ -126,8 +126,18 @@ class ExperienceMathTest {
         assertThrows(IllegalArgumentException.class, () -> ExperienceMath.costOfNextLevel(-1));
     }
 
+    /**
+     * Pinned at the boundary, not far past it. Level 21_863 is the last whose cumulative total
+     * still fits in an {@code int}; adding a full bar of progress to it does not fit, and that is
+     * the case a plain {@code +} wraps to a negative instead of refusing. Probing only some absurd
+     * level exercises the {@code toIntExact} guard and never reaches the addition at all.
+     */
     @Test
-    void refusesLevelsWhoseTotalWouldNotFitAnInt() {
+    void refusesTotalsThatWouldNotFitAnIntRightAtTheBoundary() {
+        assertEquals(2_147_407_943, ExperienceMath.totalPoints(21_863, 0f));
+
+        assertThrows(ArithmeticException.class, () -> ExperienceMath.totalPoints(21_863, 1f));
+        assertThrows(ArithmeticException.class, () -> ExperienceMath.totalPoints(21_864, 0f));
         assertThrows(ArithmeticException.class, () -> ExperienceMath.totalPoints(1_000_000, 0f));
     }
 }

@@ -198,16 +198,51 @@ class LedgerTest {
     }
 
     /**
-     * Paying yourself must never mint. Read-both-then-write-both would credit the second write
-     * over the first and hand the sender the amount for free, so the ledger short-circuits.
+     * Paying yourself short-circuits before the ledger reads anything, and this pins the
+     * short-circuit rather than its arithmetic.
+     *
+     * <p>The conservation assertion alone proves nothing here: because the debit is written before
+     * the credit is read, a self-transfer that ran the full path would read back its own
+     * uncommitted debit and land on the original balance anyway. The amount above the balance is
+     * the load-bearing case -- it can only succeed if the guard returned before the
+     * insufficient-funds check ever ran.
      */
     @Test
-    void transferToSelfIsANoOpAndNeverMints() throws Exception {
+    void transferToSelfShortCircuitsBeforeReadingAnything() throws Exception {
         ledger.deposit(ALICE, Diamonds.ofDiamonds(10)).get();
 
+        ledger.transfer(ALICE, ALICE, Diamonds.ofDiamonds(99)).get();
         ledger.transfer(ALICE, ALICE, Diamonds.ofDiamonds(4)).get();
 
         assertEquals(10_000L, ledger.balance(ALICE).get().dust());
+    }
+
+    /**
+     * An {@link Error} between the debit and the credit must roll back like anything else.
+     *
+     * <p>A {@code catch (Exception)} would skip the rollback, and restoring autocommit on the way
+     * out commits the still-open transaction -- so the debit would be committed with no credit and
+     * the money destroyed outright. {@code DatabaseExecutor} catches {@code Throwable}, so the
+     * writer thread survives and nothing else would ever report it.
+     *
+     * <p>This drives {@code inTransaction} directly because no production path can be made to
+     * throw an {@code Error} on demand: {@code AccountDao}, {@code Database}, and
+     * {@code DatabaseExecutor} are all {@code final} and cannot be subclassed to inject one.
+     */
+    @Test
+    void anErrorMidTransactionRollsBackInsteadOfCommittingTheDebit() throws Exception {
+        ledger.deposit(ALICE, Diamonds.ofDiamonds(10)).get();
+        ledger.deposit(BOB, Diamonds.ofDiamonds(3)).get();
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> executor.submit(() -> ledger.inTransaction(() -> {
+                    dao.upsertBalance(ALICE, 6_000L);
+                    throw new StackOverflowError("simulated JVM-level failure between debit and credit");
+                })).get());
+
+        assertInstanceOf(StackOverflowError.class, thrown.getCause());
+        assertEquals(10_000L, ledger.balance(ALICE).get().dust());
+        assertEquals(3_000L, ledger.balance(BOB).get().dust());
     }
 
     @Test
