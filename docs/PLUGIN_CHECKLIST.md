@@ -223,10 +223,22 @@ Testable pass/fail conditions. These become gate 6 unit tests and gate 7a runtim
 
 **Economy health**
 
-11. No configured buy-back floor is at or above its `liquidity.farm-output-costs` entry, and a floor with no matching cost entry fails config load rather than defaulting. `farm-output-audit` refuses to load a config that violates either rule.
+11. No configured buy-back floor is at or above its `liquidity.farm-output-costs` entry, and no floor loads for an item with no matching cost entry. `farm-output-audit` drops each offending entry and warns, naming the item; the surviving map contains only audited floors, and the plugin still enables. The unsafe floor never reaches the economy, which is the property that matters — the plugin does not refuse to start over one bad entry, because a market with one missing floor is better than no market at all.
+    - Wording note: an earlier draft of this check said such a floor "fails config load". It does not, and should not — the *entry* is refused, not the whole config. Recorded so a later reader does not mistake the implemented behaviour for a defect.
 12. A player exceeding a rolling buy limit is refused, and the refusal does not consume currency or stock.
 13. XP fees are charged against real XP points and cannot be transferred between players by any code path.
 14. Published prices exclude trades beyond `outlier-filter-mad`; a single 100× outlier trade does not move the published price.
+
+**Shutdown and durability**
+
+Added `2026-07-22` after the M1 whole-branch review found a money-destruction path here that no
+per-task review could see, because it spans the command layer, the executor, and the plugin
+lifecycle. The plan calls the bounded shutdown flush "a correctness requirement, not politeness";
+nothing in this section previously held it to that.
+
+23. `DatabaseExecutor.close()` drains queued writes rather than abandoning them, and its warning distinguishes work that was queued-and-dropped from work that was still executing when it gave up.
+24. `onDisable` closes the executor before the database, so no write is running when the connection closes.
+25. A write that commits during shutdown — after Paper has already set `isEnabled = false` but while `onDisable`'s flush is still running — leaves a log line naming the player, the operation, and the amount. This window is **recorded, not eliminated**: the debit commits and the items are never handed over, so the log line is the only thing making it reconcilable. Verified at gate 7a, not by unit test.
 
 **Cross-platform — gate 7a, on the Legendary stack**
 
