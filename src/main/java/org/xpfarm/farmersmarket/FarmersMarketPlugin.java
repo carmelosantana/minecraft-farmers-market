@@ -142,8 +142,10 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
         // Order is load-bearing and both guards matter: a failed enable leaves one or both of
         // these null, and an NPE here would bury whatever the real startup failure was.
         if (executor != null) {
-            // Drains the queue synchronously. Paper cancels scheduled plugin tasks at disable,
-            // so anything still queued is lost if this does not run first.
+            // Drains the queue synchronously, BEFORE the connection below is closed. Paper
+            // cancels scheduled plugin tasks at disable, so anything still queued is lost if
+            // this does not run first. close() gives up after a bounded wait and warns in its
+            // own log if it had to; it is not a guarantee that everything ran.
             executor.close();
             executor = null;
         }
@@ -151,8 +153,11 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
             try {
                 database.close();
             } catch (Exception e) {
+                // Deliberately does not claim the queue was flushed: the executor's own warning
+                // is the authority on that, and it is the line to read alongside this one.
                 getLogger().log(Level.WARNING, "FarmersMarket: the database did not close "
-                        + "cleanly. Queued writes were already flushed.", e);
+                        + "cleanly. See any FarmersMarket-DB warning just above for whether a "
+                        + "write was still in flight when this happened.", e);
             }
             database = null;
         }
