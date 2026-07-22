@@ -122,8 +122,14 @@ public final class DatabaseExecutor implements AutoCloseable {
                 abandon("did not finish draining its queue within " + shutdownTimeoutMillis + "ms");
             }
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            // Restore the interrupt flag AFTER abandon(), not before. Restoring it first makes
+            // awaitStop()'s awaitTermination throw immediately, so the warning would claim a task
+            // was "STILL EXECUTING after <grace>ms" without ever having waited that long -- a true
+            // enough conclusion reached by an untrue route, in the one log line an operator uses to
+            // reconcile money. Deferring the restore buys the grace period a real chance to observe
+            // the writer stopping.
             abandon("was interrupted while waiting for its queue to drain");
+            Thread.currentThread().interrupt();
         }
     }
 

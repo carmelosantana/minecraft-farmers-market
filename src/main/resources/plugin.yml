@@ -12,7 +12,9 @@ softdepend: [Floodgate]
 
 # The SQLite JDBC driver is loaded at runtime rather than shaded. Paper still bundles
 # org.xerial:sqlite-jdbc, but its own build file marks that as legacy and "eventually to be
-# removed", so the plugin owns its driver. Version pending confirmation at gate 4.
+# removed", so the plugin owns its driver. Version confirmed resolvable from Maven Central at
+# gate 4, and PluginDescriptorTest asserts this coordinate carries the same version as pom.xml so
+# the two cannot drift.
 libraries:
   - org.xerial:sqlite-jdbc:3.53.2.0
 

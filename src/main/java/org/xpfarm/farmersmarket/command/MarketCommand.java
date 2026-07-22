@@ -589,25 +589,6 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
     }
 
     /**
-     * The failure a caller actually cares about, with {@link CompletionException} and
-     * {@link ExecutionException} wrappers peeled off.
-     *
-     * <p>Without this, a {@link LedgerException} arriving through a chained stage is an
-     * unrecognised cause, and an unrecognised cause is treated as an unknown outcome -- which
-     * would turn every ordinary "you only have three diamonds" into an alarming message telling
-     * the player to go find an admin.
-     *
-     * <p>As things stand this is defensive rather than load-bearing: {@code DatabaseExecutor}
-     * completes its futures with {@code completeExceptionally(t)} directly, so nothing currently
-     * arrives wrapped. It is kept because the first chained stage anyone adds would change that
-     * silently, and the symptom would be the alarming message above rather than a crash.
-     *
-     * <p>Package-private rather than private so it can be tested: it is pure, it imports nothing
-     * from Bukkit, and it is the function standing between a routine refusal and a
-     * go-find-an-admin message. Same seam as {@code Ledger.inTransaction} and
-     * {@code EditionResolver.invokePublic}.
-     */
-    /**
      * The one log line a ledger operation leaves behind when it settles after the plugin was
      * disabled.
      *
@@ -631,6 +612,25 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                 + " Reconcile this account by hand.";
     }
 
+    /**
+     * The failure a caller actually cares about, with {@link CompletionException} and
+     * {@link ExecutionException} wrappers peeled off.
+     *
+     * <p>Without this, a {@link LedgerException} arriving through a chained stage is an
+     * unrecognised cause, and an unrecognised cause is treated as an unknown outcome -- which
+     * would turn every ordinary "you only have three diamonds" into an alarming message telling
+     * the player to go find an admin.
+     *
+     * <p>As things stand this is defensive rather than load-bearing: {@code DatabaseExecutor}
+     * completes its futures with {@code completeExceptionally(t)} directly, so nothing currently
+     * arrives wrapped. It is kept because the first chained stage anyone adds would change that
+     * silently, and the symptom would be the alarming message above rather than a crash.
+     *
+     * <p>Package-private rather than private so it can be tested: it is pure, it imports nothing
+     * from Bukkit, and it is the function standing between a routine refusal and a
+     * go-find-an-admin message. Same seam as {@code Ledger.inTransaction} and
+     * {@code EditionResolver.invokePublic}.
+     */
     static Throwable unwrap(Throwable failure) {
         Throwable cause = failure;
         while ((cause instanceof CompletionException || cause instanceof ExecutionException)
