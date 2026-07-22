@@ -9,8 +9,15 @@
  */
 package org.xpfarm.farmersmarket.identity;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.lang.reflect.Modifier;
+import java.util.List;
+import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 
@@ -41,5 +48,47 @@ final class EditionResolverTest {
 
         // The unlinked resolver returns before touching its argument, so null is safe here.
         assertFalse(resolver.isBedrock(null));
+    }
+
+    @Test
+    void alwaysJavaNeverReportsAPreLinkBedrockUuid() {
+        // No Floodgate means no link to find, which means the join listener performs no merge --
+        // exactly the behaviour a server without Floodgate had before this method existed.
+        assertTrue(EditionResolver.alwaysJava().linkedBedrockUuid(UUID.randomUUID()).isEmpty());
+        assertTrue(EditionResolver.alwaysJava().linkedBedrockUuid(null).isEmpty());
+    }
+
+    /**
+     * Floodgate hands back its API objects as non-public implementation classes behind public
+     * interfaces, and resolving a method on the implementation makes {@code invoke} throw
+     * {@link IllegalAccessException}. {@code List.of(...)} has exactly that shape and is on every
+     * classpath, so the two tests below exercise the real problem rather than a described one.
+     */
+    @Test
+    void invokePublicReachesAMethodDeclaredOnlyOnANonPublicClass() throws Exception {
+        List<Integer> hidden = List.of(1, 2, 3);
+        assertFalse(Modifier.isPublic(hidden.getClass().getModifiers()),
+                "this test is pointless unless the implementation class really is non-public");
+
+        // The naive route, which is what this helper exists instead of.
+        assertThrows(IllegalAccessException.class,
+                () -> hidden.getClass().getMethod("size").invoke(hidden));
+
+        assertEquals(3, EditionResolver.invokePublic(hidden, "size", new Class<?>[0]));
+    }
+
+    @Test
+    void publicTypesOfSkipsTheNonPublicImplementationAndKeepsItsPublicInterface() {
+        List<Class<?>> types = EditionResolver.publicTypesOf(List.of(1, 2, 3).getClass());
+
+        assertFalse(types.contains(List.of(1, 2, 3).getClass()),
+                "a non-public class must not be offered as somewhere to resolve a method");
+        assertTrue(types.contains(List.class), "the public interface must survive: " + types);
+    }
+
+    @Test
+    void invokePublicRefusesAMethodThatDoesNotExist() {
+        assertThrows(NoSuchMethodException.class,
+                () -> EditionResolver.invokePublic(List.of(1), "getLinkedPlayer", new Class<?>[0]));
     }
 }

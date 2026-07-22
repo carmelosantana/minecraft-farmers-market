@@ -108,21 +108,67 @@ final class PluginDescriptorTest {
         assertNotNull(permissions, "permissions section is required");
 
         for (String node : new String[] {
-            "farmersmarket.use",
-            "farmersmarket.vendor.place",
-            "farmersmarket.stall.rent",
-            "farmersmarket.chart",
-            "farmersmarket.admin",
-            "farmersmarket.admin.reload",
-            "farmersmarket.admin.floor",
-            "farmersmarket.admin.audit",
-            "farmersmarket.admin.freeze",
-            "farmersmarket.admin.pot",
-            "farmersmarket.bypass.fees",
-            "farmersmarket.bypass.buylimit",
+            "farmersmarket.use", "farmersmarket.admin", "farmersmarket.admin.reload",
         }) {
             assertTrue(permissions.containsKey(node), node + " must be declared");
         }
+    }
+
+    /**
+     * The mirror of the test above, and the reason both exist. Declaring a permission for a
+     * feature no code implements tells an operator they have a knob that does nothing; worse,
+     * it lets a future edit start <em>checking</em> a node nobody re-examined the meaning of.
+     * Each later milestone re-adds its own nodes alongside the code that reads them.
+     */
+    @Test
+    void pluginYmlDoesNotDeclarePermissionsForUnbuiltMilestones() throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> permissions = (Map<String, Object>) parse(PLUGIN_YML).get("permissions");
+        assertNotNull(permissions, "permissions section is required");
+
+        for (String unbuilt : new String[] {
+            "farmersmarket.vendor.place", "farmersmarket.stall.rent", "farmersmarket.chart",
+            "farmersmarket.admin.floor", "farmersmarket.admin.audit",
+            "farmersmarket.admin.freeze", "farmersmarket.admin.pot",
+            "farmersmarket.bypass.fees", "farmersmarket.bypass.buylimit",
+        }) {
+            assertFalse(permissions.containsKey(unbuilt),
+                    unbuilt + " belongs to a later milestone and must not be declared yet");
+        }
+    }
+
+    /**
+     * The {@code farmersmarket.admin} parent must not grant a child node that no longer exists.
+     * Paper registers an undeclared child as a permission in its own right, so a stale entry
+     * here quietly re-creates exactly the node the test above just removed.
+     */
+    @Test
+    void adminParentOnlyGrantsChildrenThatStillExist() throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> permissions = (Map<String, Object>) parse(PLUGIN_YML).get("permissions");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> admin = (Map<String, Object>) permissions.get("farmersmarket.admin");
+        assertNotNull(admin, "farmersmarket.admin must be declared");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> children = (Map<String, Object>) admin.get("children");
+        assertNotNull(children, "farmersmarket.admin must declare its children");
+        for (String child : children.keySet()) {
+            assertTrue(permissions.containsKey(child),
+                    "farmersmarket.admin grants '" + child + "', which is not declared anywhere");
+        }
+    }
+
+    /** The usage line an operator reads must name the subcommands that actually exist. */
+    @Test
+    void marketUsageNamesOnlyTheSubcommandsM1Implements() throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> commands = (Map<String, Object>) parse(PLUGIN_YML).get("commands");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> market = (Map<String, Object>) commands.get("market");
+        assertNotNull(market, "the market command must be declared");
+
+        assertEquals("/market [balance | deposit | withdraw | reload]", market.get("usage"));
     }
 
     @Test
