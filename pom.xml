@@ -64,6 +64,18 @@
             <version>26.1.2.build.74-stable</version>
             <scope>provided</scope>
         </dependency>
+        <!--
+            Provided, never shaded: plugin.yml `libraries:` supplies it at runtime. Paper still
+            bundles this driver but its own build file marks that legacy. If shading is ever
+            added, org.sqlite.* must NOT be relocated - relocation breaks the driver's
+            reflective and JNI paths (xerial/sqlite-jdbc#145).
+        -->
+        <dependency>
+            <groupId>org.xerial</groupId>
+            <artifactId>sqlite-jdbc</artifactId>
+            <version>3.53.2.0</version>
+            <scope>provided</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
