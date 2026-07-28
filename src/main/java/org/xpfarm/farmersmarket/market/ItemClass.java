@@ -14,10 +14,32 @@ package org.xpfarm.farmersmarket.market;
  *
  * <p>{@code COMMODITY} items are fungible stacks priced against a shared curve;
  * {@code UNIQUE} items (enchanted, named, or otherwise NBT-bearing) are sold one listing at a
- * time. Task 3 adds the {@code classify} rule that maps a stack to one of these; this task only
- * needs the two constants so the row types can name the column they persist.
+ * time.
+ *
+ * <p>The {@link #classify(int, boolean)} rule that maps a stack to one of these is a pure
+ * function over two primitives on purpose: the decision that guards the fungibility boundary is
+ * unit-testable without a live server, and the one Bukkit adapter ({@code BukkitItemCodec}) only
+ * has to <em>derive</em> those two primitives from a real {@code ItemStack}.
  */
 public enum ItemClass {
     COMMODITY,
-    UNIQUE
+    UNIQUE;
+
+    /**
+     * Classifies an item from the two facts that decide fungibility.
+     *
+     * <p>An item is a {@link #COMMODITY} only when it both stacks ({@code maxStackSize > 1})
+     * <em>and</em> carries no meaningful component data; everything else is {@link #UNIQUE}. A
+     * single-stack item (a tool, armour) is {@code UNIQUE} even when plain, because it cannot be
+     * pooled fungibly; a stackable item bearing enchantments, a custom name, damage, custom model
+     * data, lore, or container contents is {@code UNIQUE} because pooling it into a fungible curve
+     * would destroy what made it worth listing (the ChestShop "Anvil Wizardry" bug class).
+     *
+     * @param maxStackSize            the stack's maximum size; {@code 1} for tools and armour
+     * @param hasMeaningfulComponents whether the item carries component data that individuates it
+     * @return {@link #COMMODITY} only for a plain stackable item, otherwise {@link #UNIQUE}
+     */
+    public static ItemClass classify(int maxStackSize, boolean hasMeaningfulComponents) {
+        return (maxStackSize > 1 && !hasMeaningfulComponents) ? COMMODITY : UNIQUE;
+    }
 }
