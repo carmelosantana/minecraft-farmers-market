@@ -61,8 +61,91 @@ public final class Migrations {
             "CREATE INDEX IF NOT EXISTS idx_account_links_java ON account_links(java_uuid)"
     };
 
+    /**
+     * Migration 2: the market's persistence -- the {@code listings} escrow table, the
+     * append-only {@code trades} audit log, and the {@code pending_items} owed-item table.
+     *
+     * <p>Two guarantees are enforced by the database itself, not by application code, exactly
+     * as {@code accounts}' {@code CHECK (diamonds_dust >= 0)} already is. The money-conservation
+     * guarantee is the pair of CHECKs on {@code trades}: a recorded trade whose gross does not
+     * equal net plus tax, or whose tax does not split into burned plus pot, invented or destroyed
+     * money and is refused. The append-only guarantee is the two {@code BEFORE UPDATE}/
+     * {@code BEFORE DELETE} triggers that {@code RAISE(ABORT, ...)}: once a trade is written it is
+     * immutable, so the audit trail the whole design rests on cannot be rewritten after the fact.
+     */
+    private static final String[] MIGRATION_2 = {
+            """
+            CREATE TABLE IF NOT EXISTS listings (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                seller_uuid     TEXT    NOT NULL,
+                item_class      TEXT    NOT NULL,
+                item_key        TEXT    NOT NULL,
+                material_key    TEXT    NOT NULL,
+                display_name    TEXT,
+                summary         TEXT    NOT NULL,
+                amount          INTEGER NOT NULL,
+                price_dust      INTEGER NOT NULL,
+                item_bytes      BLOB    NOT NULL,
+                listed_at       INTEGER NOT NULL,
+                expires_at      INTEGER NOT NULL,
+                status          TEXT    NOT NULL DEFAULT 'ACTIVE',
+                sold_at         INTEGER,
+                buyer_uuid      TEXT,
+                CHECK (amount > 0),
+                CHECK (price_dust > 0)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_listings_active ON listings(status, item_class, material_key)",
+            "CREATE INDEX IF NOT EXISTS idx_listings_seller ON listings(seller_uuid, status)",
+            """
+            CREATE TABLE IF NOT EXISTS trades (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                happened_at     INTEGER NOT NULL,
+                buyer_uuid      TEXT    NOT NULL,
+                seller_uuid     TEXT    NOT NULL,
+                item_class      TEXT    NOT NULL,
+                item_key        TEXT    NOT NULL,
+                material_key    TEXT    NOT NULL,
+                amount          INTEGER NOT NULL,
+                gross_dust      INTEGER NOT NULL,
+                tax_dust        INTEGER NOT NULL,
+                tax_burned_dust INTEGER NOT NULL,
+                tax_pot_dust    INTEGER NOT NULL,
+                net_dust        INTEGER NOT NULL,
+                listing_id      INTEGER,
+                CHECK (gross_dust = net_dust + tax_dust),
+                CHECK (tax_dust = tax_burned_dust + tax_pot_dust),
+                CHECK (gross_dust >= 0 AND tax_dust >= 0 AND net_dust >= 0
+                       AND tax_burned_dust >= 0 AND tax_pot_dust >= 0)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_trades_item ON trades(item_key, happened_at)",
+            """
+            CREATE TRIGGER IF NOT EXISTS trades_no_update BEFORE UPDATE ON trades
+            BEGIN SELECT RAISE(ABORT, 'trades is append-only'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trades_no_delete BEFORE DELETE ON trades
+            BEGIN SELECT RAISE(ABORT, 'trades is append-only'); END
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pending_items (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_uuid   TEXT    NOT NULL,
+                item_bytes   BLOB    NOT NULL,
+                amount       INTEGER NOT NULL,
+                summary      TEXT    NOT NULL,
+                reason       TEXT    NOT NULL,
+                created_at   INTEGER NOT NULL,
+                claimed_at   INTEGER,
+                CHECK (amount > 0)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_pending_owner ON pending_items(owner_uuid, claimed_at)"
+    };
+
     /** Every migration this plugin has ever shipped, oldest first. Never mutate in place. */
-    private static final List<String[]> MIGRATIONS = List.<String[]>of(MIGRATION_1);
+    private static final List<String[]> MIGRATIONS = List.<String[]>of(MIGRATION_1, MIGRATION_2);
 
     private Migrations() {
     }

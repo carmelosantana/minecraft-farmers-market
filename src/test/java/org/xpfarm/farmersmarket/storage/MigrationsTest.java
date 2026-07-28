@@ -18,6 +18,7 @@ import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Locale;
 
@@ -107,6 +108,42 @@ class MigrationsTest {
         }
     }
 
+    @Test
+    void migratesToVersionTwoWithTheMarketTables(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(dir.resolve("m.db"), dir.resolve("tmp").toString(), 5000)) {
+            assertEquals(2, Migrations.applyTo(db.connection()));
+            assertTrue(tableExists(db.connection(), "listings"));
+            assertTrue(tableExists(db.connection(), "trades"));
+            assertTrue(tableExists(db.connection(), "pending_items"));
+        }
+    }
+
+    @Test
+    void tradesRejectsUpdateAndDelete(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(dir.resolve("m.db"), dir.resolve("tmp").toString(), 5000)) {
+            Migrations.applyTo(db.connection());
+            insertConservingTrade(db.connection());   // gross=100, net=93, tax=7, burned=3, pot=4
+            assertThrows(SQLException.class, () -> exec(db.connection(),
+                    "UPDATE trades SET gross_dust = 1 WHERE id = 1"),
+                    "trades is append-only; an UPDATE must be refused by the trigger");
+            assertThrows(SQLException.class, () -> exec(db.connection(),
+                    "DELETE FROM trades WHERE id = 1"),
+                    "trades is append-only; a DELETE must be refused by the trigger");
+        }
+    }
+
+    @Test
+    void tradesRefusesANonConservingRow(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(dir.resolve("m.db"), dir.resolve("tmp").toString(), 5000)) {
+            Migrations.applyTo(db.connection());
+            // gross must equal net + tax; this row claims 100 = 90 + 7 and must be refused.
+            assertThrows(SQLException.class, () -> exec(db.connection(),
+                    "INSERT INTO trades(happened_at,buyer_uuid,seller_uuid,item_class,item_key,"
+                  + "material_key,amount,gross_dust,tax_dust,tax_burned_dust,tax_pot_dust,net_dust)"
+                  + " VALUES (1,'b','s','UNIQUE','k','DIAMOND_SWORD',1,100,7,3,4,90)"));
+        }
+    }
+
     /**
      * An {@link Error} part-way through a migration must roll the whole migration back.
      *
@@ -135,8 +172,9 @@ class MigrationsTest {
                     "the accounts table was created before the failure and then committed by the "
                             + "autocommit restore; every failure must roll back first");
             assertTrue(real.getAutoCommit(), "autocommit must be restored however this fails");
-            // And the connection is left usable, not wedged mid-transaction.
-            assertEquals(1, Migrations.applyTo(real));
+            // And the connection is left usable, not wedged mid-transaction: the recovery run
+            // applies every migration this build knows, so it reaches the current schema version.
+            assertEquals(2, Migrations.applyTo(real));
             assertTrue(tableExists(real, "account_links"));
         }
     }
@@ -175,6 +213,25 @@ class MigrationsTest {
         } catch (InvocationTargetException e) {
             throw e.getCause();
         }
+    }
+
+    /** Runs one arbitrary statement, letting any {@link SQLException} propagate to the caller. */
+    private static void exec(Connection connection, String sql) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+    /**
+     * Inserts a single money-conserving {@code trades} row (id 1): gross 100 = net 93 + tax 7,
+     * tax 7 = burned 3 + pot 4. The append-only triggers, not the CHECKs, are what the tests
+     * using this then probe.
+     */
+    private static void insertConservingTrade(Connection connection) throws SQLException {
+        exec(connection,
+                "INSERT INTO trades(happened_at,buyer_uuid,seller_uuid,item_class,item_key,"
+              + "material_key,amount,gross_dust,tax_dust,tax_burned_dust,tax_pot_dust,net_dust)"
+              + " VALUES (1,'b','s','UNIQUE','k','DIAMOND_SWORD',1,100,7,3,4,93)");
     }
 
     /** Removes a table an already-applied migration created, bypassing {@link Migrations}. */
