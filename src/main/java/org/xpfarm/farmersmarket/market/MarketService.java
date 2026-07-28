@@ -272,12 +272,22 @@ public final class MarketService {
     public CompletableFuture<Integer> expireDue(long nowEpochMs, int batchLimit) {
         return executor.submit(() -> transactions.inTransaction(() -> {
             List<ListingRow> due = market.dueForExpiry(nowEpochMs, batchLimit);
+            int swept = 0;
             for (ListingRow listing : due) {
-                market.markStatus(listing.id(), ListingStatus.EXPIRED, nowEpochMs);
+                // Assert the row-count exactly as buy/cancel/claimOne do. It is 1 today: the
+                // dueForExpiry read and this markStatus write share one transaction on the single
+                // writer thread, so a row read ACTIVE cannot have left ACTIVE before the update.
+                // The guard is what keeps that invariant explicit -- if a future refactor split the
+                // read from the writes, a 0 here would skip this listing's insertPending rather than
+                // double-owe its item, and only the rows this sweep actually flipped are counted.
+                if (market.markStatus(listing.id(), ListingStatus.EXPIRED, nowEpochMs) != 1) {
+                    continue;
+                }
                 market.insertPending(new PendingItemRow(0L, listing.seller(), listing.itemBytes(),
                         listing.amount(), listing.summary(), "EXPIRED", nowEpochMs, null));
+                swept++;
             }
-            return due.size();
+            return swept;
         }));
     }
 

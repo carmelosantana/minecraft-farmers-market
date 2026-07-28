@@ -128,6 +128,44 @@ class MarketServiceTest {
     }
 
     @Test
+    void aSellerCannotBuyTheirOwnListing() throws Exception {
+        // A seller may well be funded -- fund them, so the refusal is proven to be the self-purchase
+        // guard and not an incidental insufficient-funds failure.
+        fund(SELLER, Diamonds.ofDiamonds(200));
+        long id = service.list(SELLER, uniqueItem(), Diamonds.ofDiamonds(100), 40, NOW, 14).get();
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> service.buy(SELLER, id, 7.0, 0.5, NOW).get());
+
+        assertEquals(MarketException.Reason.SELF_PURCHASE,
+                assertInstanceOf(MarketException.class, thrown.getCause()).reason());
+        assertEquals(0, tradeCount(), "a refused self-purchase logs no trade");
+        assertEquals(200_000L, currentBalance(SELLER).dust(), "no money moved");
+        assertEquals(ListingStatus.ACTIVE, service.findListing(id).get().orElseThrow().status(),
+                "the listing is still on sale");
+    }
+
+    @Test
+    void anOwedItemCannotBeClaimedTwice() throws Exception {
+        // Expire a listing to owe SELLER an item, then read its pending id.
+        long id = service.list(SELLER, uniqueItem(), Diamonds.ofDiamonds(10), 40, NOW, 14).get();
+        long later = NOW + java.time.Duration.ofDays(15).toMillis();
+        service.expireDue(later, 100).get();
+        long pendingId = service.pendingFor(SELLER).get().get(0).id();
+
+        PendingItemRow claimed = service.claimOne(SELLER, pendingId, later).get();
+        assertEquals(pendingId, claimed.id(), "the first claim returns the owed row");
+
+        // The second claim must not succeed a second delivery: the markClaimed != 1 guard fires.
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> service.claimOne(SELLER, pendingId, later).get());
+        assertEquals(MarketException.Reason.LISTING_UNAVAILABLE,
+                assertInstanceOf(MarketException.class, thrown.getCause()).reason());
+        assertTrue(service.pendingFor(SELLER).get().isEmpty(),
+                "the item stays claimed -- a failed second claim does not resurrect the debt");
+    }
+
+    @Test
     void cancellingReturnsTheEscrowBytesAndTakesTheListingDown() throws Exception {
         byte[] original = uniqueItem().itemBytes();
         long id = service.list(SELLER, uniqueItem(), Diamonds.ofDiamonds(100), 40, NOW, 14).get();
