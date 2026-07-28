@@ -323,6 +323,37 @@ public final class MarketService {
         }));
     }
 
+    // ----------------------------------------------------------- holdForClaim
+
+    /**
+     * Records an item the market owes {@code owner} as a fresh {@code pending_items} row, so it
+     * shows up in {@code /market claim}, and returns the new row's id.
+     *
+     * <p>This is the escrow of last resort the command layer reaches for when a bought or
+     * cancelled unique cannot be handed over immediately -- the recipient is offline, or their
+     * inventory is full. A valuable unique is held here rather than dropped on the ground, because
+     * a dropped item despawns and this one must not. The insert is a single statement on the
+     * single writer thread, so it needs no transaction, exactly like {@link #list}'s insert.
+     *
+     * @param owner      the player owed the item
+     * @param itemBytes  the serialized stack to hold, read back verbatim on claim
+     * @param amount     the stack size owed; must be positive, enforced by the table
+     * @param summary    a human-readable one-line description of what is owed
+     * @param reason     why it is owed, for the audit trail (e.g. {@code "PURCHASE"},
+     *                   {@code "CANCELLED"})
+     * @param nowEpochMs when the debt was recorded, epoch milliseconds
+     * @return a future completing with the new {@code pending_items} row id
+     */
+    public CompletableFuture<Long> holdForClaim(UUID owner, byte[] itemBytes, int amount,
+            String summary, String reason, long nowEpochMs) {
+        Objects.requireNonNull(owner, "owner");
+        Objects.requireNonNull(itemBytes, "itemBytes");
+        Objects.requireNonNull(summary, "summary");
+        Objects.requireNonNull(reason, "reason");
+        return executor.submit(() -> market.insertPending(new PendingItemRow(0L, owner, itemBytes,
+                amount, summary, reason, nowEpochMs, null)));
+    }
+
     // ------------------------------------------------------------- read helpers
 
     /**

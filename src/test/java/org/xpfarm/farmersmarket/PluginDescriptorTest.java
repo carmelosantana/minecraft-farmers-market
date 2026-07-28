@@ -163,14 +163,15 @@ final class PluginDescriptorTest {
 
     /** The usage line an operator reads must name the subcommands that actually exist. */
     @Test
-    void marketUsageNamesOnlyTheSubcommandsM1Implements() throws IOException {
+    void marketUsageNamesTheSubcommandsThisBuildImplements() throws IOException {
         @SuppressWarnings("unchecked")
         Map<String, Object> commands = (Map<String, Object>) parse(PLUGIN_YML).get("commands");
         @SuppressWarnings("unchecked")
         Map<String, Object> market = (Map<String, Object>) commands.get("market");
         assertNotNull(market, "the market command must be declared");
 
-        assertEquals("/market [balance | deposit | withdraw | reload]", market.get("usage"));
+        assertEquals("/market [balance | deposit | withdraw | sell | browse | info | buy | "
+                + "cancel | mine | claim | pot | reload]", market.get("usage"));
     }
 
     @Test
