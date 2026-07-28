@@ -9,12 +9,10 @@
  */
 package org.xpfarm.farmersmarket.ledger;
 
-import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 
 import org.xpfarm.farmersmarket.identity.AccountMerge;
@@ -22,6 +20,7 @@ import org.xpfarm.farmersmarket.storage.AccountDao;
 import org.xpfarm.farmersmarket.storage.AccountRow;
 import org.xpfarm.farmersmarket.storage.Database;
 import org.xpfarm.farmersmarket.storage.DatabaseExecutor;
+import org.xpfarm.farmersmarket.storage.TransactionRunner;
 
 /**
  * The only thing in this plugin that moves money.
@@ -58,21 +57,22 @@ import org.xpfarm.farmersmarket.storage.DatabaseExecutor;
  */
 public final class Ledger {
 
-    private final Database database;
     private final AccountDao accounts;
     private final DatabaseExecutor executor;
+    private final TransactionRunner transactions;
 
     /**
      * @param database the open database, needed for transaction control -- {@link AccountDao}
      *                 deliberately runs no transactions of its own, so the boundary of one has
-     *                 to be drawn here where the multi-statement operations live
+     *                 to be drawn here where the multi-statement operations live. This class holds
+     *                 it only to build its own {@link TransactionRunner}
      * @param accounts the DAO every read and write goes through
      * @param executor the single writer thread every operation runs on
      */
     public Ledger(Database database, AccountDao accounts, DatabaseExecutor executor) {
-        this.database = Objects.requireNonNull(database, "database");
         this.accounts = Objects.requireNonNull(accounts, "accounts");
         this.executor = Objects.requireNonNull(executor, "executor");
+        this.transactions = new TransactionRunner(Objects.requireNonNull(database, "database"));
     }
 
     /**
@@ -217,10 +217,11 @@ public final class Ledger {
      *
      * <p><b>M2: this method opens its own transaction. Do not call it from inside one.</b> A sale
      * that wants to move money and write a listing, an escrow row, and a trade-log row atomically
-     * cannot wrap this call in {@link #inTransaction} -- there is one connection, and the guard
-     * there refuses the nesting outright. Put the whole sale inside one {@link #inTransaction}
-     * and use {@link AccountDao} plus the {@link Diamonds} arithmetic directly, or give this
-     * class a method that does the whole sale. See {@link #inTransaction} for why.
+     * cannot wrap this call in {@link TransactionRunner#inTransaction} -- there is one connection,
+     * and the guard there refuses the nesting outright. Put the whole sale inside one
+     * {@link TransactionRunner#inTransaction} and use {@link AccountDao} plus the {@link Diamonds}
+     * arithmetic directly, or give this class a method that does the whole sale. See
+     * {@link TransactionRunner#inTransaction} for why.
      *
      * @param from   the account to debit
      * @param to     the account to credit
@@ -244,9 +245,9 @@ public final class Ledger {
             // needs the money move, the escrow row, and the trade-log row in one transaction --
             // so if you are here to compose this call into a larger operation, stop: one
             // connection means the inner commit would commit the outer caller's half-applied
-            // work, and inTransaction refuses the nesting rather than allowing it. Compose
-            // inside a single inTransaction over the DAO instead.
-            return inTransaction(() -> {
+            // work, and TransactionRunner refuses the nesting rather than allowing it. Compose
+            // inside a single TransactionRunner.inTransaction over the DAO instead.
+            return transactions.inTransaction(() -> {
                 Diamonds held = Diamonds.ofDust(accounts.balanceDust(from));
                 Diamonds remaining = held.minus(amount);
                 if (remaining.isNegative()) {
@@ -296,8 +297,8 @@ public final class Ledger {
             // Opens a transaction, exactly as transfer does, and with the same warning: this is
             // not composable into a larger one. When M2 gives a linking player their listings,
             // escrow, and open offers as well, the transaction has to be widened here rather
-            // than by wrapping this call -- see inTransaction's nesting guard.
-            return inTransaction(() -> {
+            // than by wrapping this call -- see TransactionRunner's nesting guard.
+            return transactions.inTransaction(() -> {
                 if (alreadyLinked(floodgateUuid)) {
                     return null;
                 }
@@ -328,84 +329,6 @@ public final class Ledger {
                 return null;
             });
         });
-    }
-
-    /**
-     * Runs {@code work} inside one SQL transaction on the connection's own thread, committing on
-     * success and rolling back on any failure whatsoever.
-     *
-     * <p><b>{@code Throwable}, not {@code Exception}, and that distinction is money.</b> An
-     * {@link Error} -- an {@link OutOfMemoryError} between a transfer's debit and its credit, say
-     * -- would skip a narrower {@code catch}, and restoring autocommit on the way out is
-     * implemented by the driver as a {@code COMMIT} of the still-open transaction. The debit
-     * would be committed with no credit and the player's diamonds destroyed, with nothing but an
-     * exceptionally-completed future to show for it, because {@link DatabaseExecutor#submit}
-     * catches {@code Throwable} and the writer thread survives. Every failure rolls back here,
-     * and every failure is rethrown -- an {@code Error} is never swallowed.
-     *
-     * <p>Autocommit is restored on the way out, success or failure, so this never leaves the
-     * shared connection in a mode a later caller did not expect. Neither the rollback nor that
-     * restoration may replace the failure that caused them: the caller switches on
-     * {@link LedgerException#reason()} to choose what to tell the player, and a {@link SQLException}
-     * thrown out of cleanup would hide it. Both are attached to the original as suppressed
-     * exceptions instead. On the success path there is no original to hide, so a failed
-     * restoration propagates rather than leaving the connection silently stuck outside autocommit.
-     *
-     * <p><b>Nesting is refused outright.</b> There is one connection, so an inner call's
-     * {@code commit()} would commit whatever the outer call had applied so far and then hand the
-     * outer call a transaction it no longer owns -- reopening exactly the half-applied-transfer
-     * window this class exists to close. JDBC offers no way to detect that other than autocommit
-     * already being off, so that is the check, made before anything is written.
-     *
-     * <p><b>M2 is the milestone that makes nesting reachable, and the two existing call sites are
-     * where it will be reached from.</b> {@link #transfer} and {@link #mergeAccounts} each open
-     * their own transaction; an M2 sale that wants the money move, the escrow row, and the
-     * immutable trade-log row to commit or fail together cannot get that by wrapping either of
-     * them, and the guard above turns the attempt into an {@link IllegalStateException} rather
-     * than a silently half-applied trade. The way to compose is to write the whole operation as
-     * one {@code inTransaction} body over {@link AccountDao}, reusing the {@link Diamonds}
-     * arithmetic for the overflow checks, or to add a method here that owns the whole operation.
-     * Do not add a re-entrancy count or a savepoint to make nesting work: SQLite savepoints would
-     * let an outer failure keep an inner success, which for a trade log is worse than refusing.
-     *
-     * <p>Package-private rather than private purely so {@code LedgerTest} can drive a failure that
-     * is not an {@code Exception} through it. There is no other way to reach that path -- the
-     * classes this method calls into are all {@code final} -- and the alternative is a guarantee
-     * about player money that nothing verifies. It is the narrowest seam that does the job: no
-     * production caller outside this class exists, and the behaviour is identical either way.
-     */
-    <T> T inTransaction(Callable<T> work) throws Exception {
-        Connection connection = database.connection();
-        if (!connection.getAutoCommit()) {
-            throw new IllegalStateException("nested transaction: this connection is already "
-                    + "inside one, and the inner commit would commit the outer caller's "
-                    + "half-applied work");
-        }
-        boolean previousAutoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
-        Throwable failure = null;
-        try {
-            T result = work.call();
-            connection.commit();
-            return result;
-        } catch (Throwable t) {
-            failure = t;
-            try {
-                connection.rollback();
-            } catch (SQLException rollbackFailure) {
-                t.addSuppressed(rollbackFailure);
-            }
-            throw t;
-        } finally {
-            try {
-                connection.setAutoCommit(previousAutoCommit);
-            } catch (SQLException restoreFailure) {
-                if (failure == null) {
-                    throw restoreFailure;
-                }
-                failure.addSuppressed(restoreFailure);
-            }
-        }
     }
 
     /**
