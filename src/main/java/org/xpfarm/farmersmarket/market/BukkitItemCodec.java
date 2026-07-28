@@ -21,7 +21,12 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.BlockStateMeta;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.EnchantmentStorageMeta;
+import org.bukkit.inventory.meta.FireworkEffectMeta;
+import org.bukkit.inventory.meta.FireworkMeta;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.MapMeta;
+import org.bukkit.inventory.meta.PotionMeta;
+import org.bukkit.inventory.meta.SkullMeta;
 
 /**
  * The single class in the {@code market} package permitted to import {@code org.bukkit.*}: it
@@ -112,6 +117,14 @@ public final class BukkitItemCodec {
             return true;
         }
         if (meta instanceof EnchantmentStorageMeta stored && stored.hasStoredEnchants()) {
+            return true;
+        }
+        // Stackable items that still carry per-instance identity of their own: a tipped arrow's
+        // potion type, a filled map, a player head's texture, a firework's flight and effects.
+        // None of the branches above sees these, yet each individuates the item, so any of them
+        // must be UNIQUE rather than pooled into a fungible commodity curve.
+        if (meta instanceof PotionMeta || meta instanceof MapMeta || meta instanceof SkullMeta
+                || meta instanceof FireworkMeta || meta instanceof FireworkEffectMeta) {
             return true;
         }
         if (meta instanceof BlockStateMeta blockState && blockState.hasBlockState()) {
