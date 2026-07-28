@@ -1,5 +1,6 @@
 /*
- * FarmersMarket - the /market command tree: balance, deposit, withdraw, and reload.
+ * FarmersMarket - the /market command tree: balance, deposit, withdraw, sell, browse, info, buy,
+ *                 cancel, mine, claim, pot, and reload.
  * Copyright (C) 2026 Carmelo Santana
  *
  * This program is free software: you can redistribute it and/or modify it under the
@@ -36,13 +37,23 @@ import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.Plugin;
 import org.jetbrains.annotations.NotNull;
 
+import org.xpfarm.farmersmarket.config.FmConfig;
 import org.xpfarm.farmersmarket.ledger.Diamonds;
 import org.xpfarm.farmersmarket.ledger.ExperienceMath;
 import org.xpfarm.farmersmarket.ledger.Ledger;
 import org.xpfarm.farmersmarket.ledger.LedgerException;
+import org.xpfarm.farmersmarket.market.BukkitItemCodec;
+import org.xpfarm.farmersmarket.market.ItemClass;
+import org.xpfarm.farmersmarket.market.ListedItem;
+import org.xpfarm.farmersmarket.market.ListingRow;
+import org.xpfarm.farmersmarket.market.MarketException;
+import org.xpfarm.farmersmarket.market.MarketMath;
+import org.xpfarm.farmersmarket.market.MarketService;
+import org.xpfarm.farmersmarket.market.PendingItemRow;
 
 /**
- * {@code /market [balance | deposit [qty] | withdraw <qty> | reload]}, with tab completion.
+ * {@code /market [balance | deposit | withdraw | sell | browse | info | buy | cancel | mine |
+ * claim | pot | reload]}, with tab completion.
  *
  * <p>Every decision this command makes lives in {@link MarketResolver} as a pure function. What
  * is left here is dispatch, the thread hop, and the three things that genuinely need a running
@@ -92,19 +103,29 @@ import org.xpfarm.farmersmarket.ledger.LedgerException;
  */
 public final class MarketCommand implements CommandExecutor, TabCompleter {
 
+    /** Listings shown per {@code /market browse} page. */
+    private static final int BROWSE_PAGE_SIZE = 10;
+
     private final Plugin plugin;
     private final Logger log;
     private final Ledger ledger;
+    private final MarketService market;
+    private final Supplier<FmConfig> config;
     private final Supplier<List<String>> reloadAction;
 
     /**
      * @param plugin       the owning plugin: schedules work back onto the main thread, resolves
      *                     players by UUID, and supplies the logger every line here is written to
-     * @param ledger       the one thing in the plugin that moves money
+     * @param ledger       the one thing in the plugin that moves money for balance/deposit/withdraw
+     * @param market       the market's list/buy/cancel/claim operations, all of which run on the
+     *                     database writer thread and settle back through {@link #onMainThread}
+     * @param config       the live configuration, read through a supplier so a {@code /market
+     *                     reload} that swaps the snapshot is seen on the very next command
      * @param reloadAction re-reads {@code config.yml} and returns the validation warnings it
      *                     produced, empty when the file was clean
      */
-    public MarketCommand(Plugin plugin, Ledger ledger, Supplier<List<String>> reloadAction) {
+    public MarketCommand(Plugin plugin, Ledger ledger, MarketService market,
+            Supplier<FmConfig> config, Supplier<List<String>> reloadAction) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
         // The plugin's own logger, not Logger.getLogger(MarketCommand.class.getName()): Paper
         // prefixes a plugin logger's output with [FarmersMarket], and every line this class
@@ -116,6 +137,8 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
         // console into a ticket.
         this.log = plugin.getLogger();
         this.ledger = Objects.requireNonNull(ledger, "ledger");
+        this.market = Objects.requireNonNull(market, "market");
+        this.config = Objects.requireNonNull(config, "config");
         this.reloadAction = Objects.requireNonNull(reloadAction, "reloadAction");
     }
 
@@ -133,6 +156,14 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
             case DEPOSIT_ALL -> deposit((Player) sender, DEPOSIT_EVERYTHING);
             case DEPOSIT_AMOUNT -> deposit((Player) sender, resolved.diamonds());
             case WITHDRAW_AMOUNT -> withdraw((Player) sender, resolved.diamonds());
+            case SELL -> sell((Player) sender, resolved.priceDust());
+            case BROWSE -> browse(sender, resolved.page());
+            case INFO -> info(sender, resolved.listingId());
+            case BUY -> buy((Player) sender, resolved.listingId());
+            case CANCEL -> cancel((Player) sender, resolved.listingId());
+            case MINE -> mine((Player) sender);
+            case CLAIM -> claim((Player) sender);
+            case POT -> pot(sender);
             case RELOAD -> reload(sender);
             default -> error(sender, MarketResolver.usage());
         }
@@ -406,6 +437,481 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                 });
     }
 
+    // ---- sell -------------------------------------------------------------------------
+
+    /**
+     * Lists the item in the player's main hand for sale.
+     *
+     * <p><b>Never take without giving, never give without taking.</b> Nothing leaves the player
+     * and no fee is charged until the escrow write is attempted: a commodity item, an unaffordable
+     * fee, and an overflowing price all stop with the item still in hand and the XP untouched. The
+     * item is removed from the hand <em>before</em> {@link MarketService#list} runs, because the
+     * alternative -- list first, remove second -- lists an item the player could log out still
+     * holding, and then the escrow row and the inventory both claim it. The XP fee is charged
+     * <em>after</em> the escrow write succeeds, so a refused listing costs neither the item nor the
+     * fee, and a successful one costs both.
+     */
+    private void sell(Player player, long priceDust) {
+        UUID id = player.getUniqueId();
+        ItemStack inHand = player.getInventory().getItemInMainHand();
+        if (inHand == null || inHand.getType().isAir() || inHand.getAmount() <= 0) {
+            error(player, "Hold the item you want to sell.");
+            return;
+        }
+
+        ListedItem item = BukkitItemCodec.encode(inHand);
+        if (item.itemClass() == ItemClass.COMMODITY) {
+            // Nothing has been removed or charged.
+            error(player, MarketResolver.messageFor(MarketException.Reason.COMMODITY_NOT_YET));
+            return;
+        }
+
+        FmConfig cfg = config.get();
+        Diamonds price = Diamonds.ofDust(priceDust);
+        int fee;
+        try {
+            fee = MarketMath.listingFeeXp(price, cfg.listingFeePercent(), cfg.xpPerDiamond());
+        } catch (ArithmeticException overflow) {
+            // An absurd price whose fee will not fit in an int. Refused before anything moves.
+            error(player, "That price is too large to list.");
+            return;
+        }
+        int have = experiencePoints(player);
+        if (have < fee) {
+            error(player, "Listing costs " + fee + " XP and you have " + have + ".");
+            return;
+        }
+
+        // Capture the exact stack that was encoded, then take it out of the hand. The clone is what
+        // gets handed back on a refusal, so a refusal returns precisely what was listed.
+        ItemStack removed = inHand.clone();
+        player.getInventory().setItemInMainHand(null);
+        Location where = player.getLocation();
+
+        onMainThread(market.list(id, item, price, cfg.maxListingsPerPlayer(),
+                System.currentTimeMillis(), cfg.listingDurationDays()), id,
+                "listing " + item.summary(), (listingId, failure) -> {
+                    if (failure == null) {
+                        // Escrow committed: now, and only now, charge the fee. Re-resolve the
+                        // player -- if they logged off in the window, the item is safely listed and
+                        // the fee is simply not charged, which is the non-dangerous direction.
+                        Player again = plugin.getServer().getPlayer(id);
+                        if (again != null) {
+                            again.giveExp(-fee);
+                        }
+                        message(id, text("Listed as #" + listingId + " for " + price.format()
+                                + " diamonds. Fee: " + fee + " XP.", NamedTextColor.GREEN));
+                        return;
+                    }
+                    if (failure instanceof MarketException refused) {
+                        // A refusal is definite: nothing was written, so the item is safe to return
+                        // and no fee was charged.
+                        giveOrDrop(id, where, removed);
+                        message(id, text(MarketResolver.messageFor(refused.reason()),
+                                NamedTextColor.RED));
+                        return;
+                    }
+                    // Unknown, not failed. The item left the hand and may or may not be listed;
+                    // returning it could dupe it, so it is not returned. Same policy as deposit.
+                    reportUncertain(id, "listing " + item.summary(), failure,
+                            "Your item was taken out of your hand and may or may not be listed; "
+                                    + "do not sell another copy until an admin checks.");
+                });
+    }
+
+    // ---- buy --------------------------------------------------------------------------
+
+    /**
+     * Buys a listing. The sale -- the money move, the tax split, and the trade-log row -- commits
+     * on the writer thread inside one transaction; only after it has committed is the item
+     * delivered. If delivery cannot happen (the buyer is offline or full) the unique is held for
+     * claim rather than dropped, because the sale is already final and a valuable unique must not
+     * despawn on the ground.
+     */
+    private void buy(Player player, long listingId) {
+        UUID id = player.getUniqueId();
+        FmConfig cfg = config.get();
+        onMainThread(market.buy(id, listingId, cfg.salesTaxPercent(), cfg.taxBurnShare(),
+                System.currentTimeMillis()), id, "buying listing " + listingId,
+                (result, failure) -> {
+                    if (failure == null) {
+                        message(id, text("Bought #" + listingId + " for "
+                                + result.split().gross().format() + " diamonds (tax "
+                                + result.split().tax().format() + "). Enjoy!", NamedTextColor.GREEN));
+                        ItemStack bought;
+                        try {
+                            bought = BukkitItemCodec.decode(result.itemBytes());
+                        } catch (RuntimeException corrupt) {
+                            // The sale has ALREADY committed -- money moved, listing SOLD -- and the
+                            // escrowed unique can no longer be built into an ItemStack (a Paper or
+                            // registry change across a server upgrade while it sat listed). The buyer
+                            // is charged; losing the item here would be a silent loss. The raw bytes
+                            // still survive, so hold them for claim from the bytes themselves rather
+                            // than decoding -- claimNext's own decode-guard skips-and-logs a
+                            // permanently-undecodable row on the claim side. Same reconciliation
+                            // standard as reportUncertain: name the player, listing, and operation.
+                            log.log(Level.WARNING, "FarmersMarket: buyer " + id + " bought listing "
+                                    + listingId + " but its escrowed item could not be decoded after "
+                                    + "the sale committed; holding the raw bytes in /market claim for "
+                                    + "an admin to recover. The buyer was charged and the sale is "
+                                    + "final -- no money is compensated.", corrupt);
+                            holdBytesForClaim(id, result.itemBytes(), result.amount(),
+                                    result.summary(), "PURCHASE",
+                                    "Your purchased item could not be delivered just now; it is "
+                                            + "waiting in /market claim.");
+                            return;
+                        }
+                        deliverItemOrHold(id, bought, result.amount(), result.summary(), "PURCHASE");
+                        return;
+                    }
+                    if (failure instanceof MarketException refused) {
+                        // Nothing was written -- the sale rolls back whole on any refusal.
+                        message(id, text(MarketResolver.messageFor(refused.reason()),
+                                NamedTextColor.RED));
+                        return;
+                    }
+                    reportUncertain(id, "buying listing " + listingId, failure,
+                            "You may or may not have been charged; check /market balance before "
+                                    + "trying again.");
+                });
+    }
+
+    // ---- cancel -----------------------------------------------------------------------
+
+    /**
+     * Cancels the player's own listing, taking it off sale and returning the escrowed item. The
+     * seller is standing right there, so the item almost always lands back in their hand; if it
+     * does not, it is held for claim like a purchase, never dropped.
+     */
+    private void cancel(Player player, long listingId) {
+        UUID id = player.getUniqueId();
+        onMainThread(market.cancel(id, listingId, System.currentTimeMillis()), id,
+                "cancelling listing " + listingId, (bytes, failure) -> {
+                    if (failure == null) {
+                        message(id, text("Cancelled listing #" + listingId + ".",
+                                NamedTextColor.GREEN));
+                        ItemStack stack;
+                        String summary;
+                        try {
+                            stack = BukkitItemCodec.decode(bytes);
+                            summary = BukkitItemCodec.encode(stack).summary();
+                        } catch (RuntimeException corrupt) {
+                            // The cancel has ALREADY committed -- the listing is CANCELLED -- and the
+                            // escrowed item can no longer be decoded (a Paper or registry change
+                            // while it sat listed). Dropping it here would be a silent loss, so hold
+                            // the raw bytes for claim rather than the decoded stack; claimNext's own
+                            // decode-guard skips-and-logs a permanently-undecodable row on the claim
+                            // side. amount 1 and a generic summary only satisfy the pending row's
+                            // amount > 0 / NOT NULL constraints -- the true amount is unknown without
+                            // a decodable stack, and the row is never actually handed over anyway.
+                            // Same reconciliation standard as reportUncertain.
+                            log.log(Level.WARNING, "FarmersMarket: seller " + id + " cancelled listing "
+                                    + listingId + " but its escrowed item could not be decoded after "
+                                    + "the cancel committed; holding the raw bytes in /market claim for "
+                                    + "an admin to recover.", corrupt);
+                            holdBytesForClaim(id, bytes, 1,
+                                    "Unreadable cancelled item (listing #" + listingId + ")",
+                                    "CANCELLED",
+                                    "Your cancelled item could not be returned just now; it is "
+                                            + "waiting in /market claim.");
+                            return;
+                        }
+                        deliverItemOrHold(id, stack, stack.getAmount(), summary, "CANCELLED");
+                        return;
+                    }
+                    if (failure instanceof MarketException refused) {
+                        message(id, text(MarketResolver.messageFor(refused.reason()),
+                                NamedTextColor.RED));
+                        return;
+                    }
+                    reportUncertain(id, "cancelling listing " + listingId, failure,
+                            "Your listing may or may not have been cancelled; check /market mine "
+                                    + "before trying again.");
+                });
+    }
+
+    // ---- browse / info / mine / pot (read-only) ---------------------------------------
+
+    /** A page of the active unique listings. Read-only, so the console may run it. */
+    private void browse(CommandSender sender, int page) {
+        onMainThreadForSender(market.browse(null, page, BROWSE_PAGE_SIZE), sender, (rows, failure) -> {
+            if (failure != null) {
+                sender.sendMessage(text("Could not read the market just now.", NamedTextColor.RED));
+                return;
+            }
+            if (rows.isEmpty()) {
+                sender.sendMessage(text(page == 1 ? "Nothing is listed right now."
+                        : "No listings on page " + page + ".", NamedTextColor.AQUA));
+                return;
+            }
+            sender.sendMessage(text("Market listings, page " + page + ":", NamedTextColor.AQUA));
+            for (ListingRow row : rows) {
+                sender.sendMessage(text("#" + row.id() + "  " + row.summary() + "  -- "
+                        + Diamonds.ofDust(row.priceDust()).format() + " diamonds",
+                        NamedTextColor.YELLOW));
+            }
+            sender.sendMessage(text("Buy one with /market buy <number>.", NamedTextColor.GRAY));
+        });
+    }
+
+    /** The full detail of one listing, including a container's content summary. Read-only. */
+    private void info(CommandSender sender, long listingId) {
+        onMainThreadForSender(market.findListing(listingId), sender, (found, failure) -> {
+            if (failure != null) {
+                sender.sendMessage(text("Could not read the market just now.", NamedTextColor.RED));
+                return;
+            }
+            if (found.isEmpty()) {
+                sender.sendMessage(text("There is no listing #" + listingId + ".",
+                        NamedTextColor.RED));
+                return;
+            }
+            ListingRow row = found.get();
+            sender.sendMessage(text("Listing #" + row.id(), NamedTextColor.AQUA));
+            sender.sendMessage(text("Item: " + row.summary(), NamedTextColor.YELLOW));
+            sender.sendMessage(text("Price: " + Diamonds.ofDust(row.priceDust()).format()
+                    + " diamonds", NamedTextColor.YELLOW));
+            sender.sendMessage(text("Status: " + row.status(), NamedTextColor.GRAY));
+        });
+    }
+
+    /** The player's own still-active listings -- the ones they can cancel. */
+    private void mine(Player player) {
+        UUID id = player.getUniqueId();
+        onMainThreadForSender(market.myListings(id), player, (rows, failure) -> {
+            if (failure != null) {
+                player.sendMessage(text("Could not read the market just now.", NamedTextColor.RED));
+                return;
+            }
+            if (rows.isEmpty()) {
+                player.sendMessage(text("You have no active listings.", NamedTextColor.AQUA));
+                return;
+            }
+            player.sendMessage(text("Your active listings:", NamedTextColor.AQUA));
+            for (ListingRow row : rows) {
+                player.sendMessage(text("#" + row.id() + "  " + row.summary() + "  -- "
+                        + Diamonds.ofDust(row.priceDust()).format() + " diamonds",
+                        NamedTextColor.YELLOW));
+            }
+            player.sendMessage(text("Cancel one with /market cancel <number>.", NamedTextColor.GRAY));
+        });
+    }
+
+    /** The community pot balance. Read-only, so the console may run it. */
+    private void pot(CommandSender sender) {
+        onMainThreadForSender(market.communityPotBalance(), sender, (balance, failure) -> {
+            if (failure != null) {
+                sender.sendMessage(text("Could not read the market just now.", NamedTextColor.RED));
+                return;
+            }
+            sender.sendMessage(text("Community pot: " + balance.format() + " diamonds",
+                    NamedTextColor.AQUA));
+        });
+    }
+
+    // ---- claim ------------------------------------------------------------------------
+
+    /**
+     * Hands the player everything the market owes them -- sold-listing items they were away for,
+     * cancelled or expired items that would not fit -- one row at a time.
+     *
+     * <p><b>Claim before deliver, never the other way round.</b> Every other flow in this plugin
+     * writes to the ledger or the market first and touches the inventory second, and claim is no
+     * exception: for each owed row it marks the row claimed <em>before</em> putting the item in the
+     * inventory. The alternative -- give first, mark claimed second -- lets two overlapping
+     * {@code /market claim} runs each read the row as unclaimed, each hand over a copy, and only
+     * then have one of the two {@code claimOne} calls fail: that is a duplicate. Marking claimed
+     * first makes the second run's {@code claimOne} a definite refusal that hands over nothing.
+     * Space is checked before the claim so a full inventory refuses cleanly without marking
+     * anything, and any owed item that still will not fit after the claim commits (the inventory
+     * changed during the write) is re-held for claim rather than lost.
+     */
+    private void claim(Player player) {
+        UUID id = player.getUniqueId();
+        onMainThreadForSender(market.pendingFor(id), player, (pending, failure) -> {
+            if (failure != null) {
+                player.sendMessage(text("Could not read the market just now.", NamedTextColor.RED));
+                return;
+            }
+            if (pending.isEmpty()) {
+                player.sendMessage(text("You have nothing to claim.", NamedTextColor.AQUA));
+                return;
+            }
+            claimNext(id, pending, 0, 0);
+        });
+    }
+
+    /**
+     * Claims one owed row and recurses to the next, threading the running claimed-count so the
+     * final message and the inventory-full message can name it. Runs on the main thread; each
+     * {@link MarketService#claimOne} hops to the writer thread and back through
+     * {@link #onMainThread}, so this is a chain of ticks, not a busy loop.
+     */
+    private void claimNext(UUID id, List<PendingItemRow> pending, int index, int claimedSoFar) {
+        if (index >= pending.size()) {
+            message(id, text("Claimed " + claimedSoFar + " item" + plural(claimedSoFar) + ".",
+                    NamedTextColor.GREEN));
+            return;
+        }
+        Player online = plugin.getServer().getPlayer(id);
+        if (online == null) {
+            // Left mid-claim. Everything not yet claimed is still owed and waits for next time.
+            return;
+        }
+        PendingItemRow row = pending.get(index);
+        ItemStack stack;
+        try {
+            stack = BukkitItemCodec.decode(row.itemBytes());
+        } catch (RuntimeException corrupt) {
+            // One unreadable owed row must not sink the whole claim. Leave it owed, log it, move on.
+            log.log(Level.WARNING, "FarmersMarket: could not decode owed item " + row.id()
+                    + " for " + id + "; leaving it in /market claim for an admin to look at.", corrupt);
+            claimNext(id, pending, index + 1, claimedSoFar);
+            return;
+        }
+
+        if (!fitsWholly(online, stack)) {
+            int remaining = pending.size() - index;
+            if (claimedSoFar > 0) {
+                message(id, text("Claimed " + claimedSoFar + " item" + plural(claimedSoFar) + ".",
+                        NamedTextColor.GREEN));
+            }
+            message(id, text("Your inventory is full. " + remaining + " item" + plural(remaining)
+                    + " still waiting in /market claim.", NamedTextColor.YELLOW));
+            return;
+        }
+
+        onMainThread(market.claimOne(id, row.id(), System.currentTimeMillis()), id,
+                "claiming owed item " + row.id(), (claimed, failure) -> {
+                    if (failure == null) {
+                        deliverClaimed(id, claimed);
+                        claimNext(id, pending, index + 1, claimedSoFar + 1);
+                        return;
+                    }
+                    if (failure instanceof MarketException refused) {
+                        // Definite refusal: the row was claimed by an overlapping run or is gone, and
+                        // nothing was written here, so nothing was handed over. Skip it and continue.
+                        log.fine("FarmersMarket: owed item " + row.id() + " for " + id
+                                + " was already claimed; skipping. " + refused.reason());
+                        claimNext(id, pending, index + 1, claimedSoFar);
+                        return;
+                    }
+                    // Unknown outcome: the claim may or may not have committed, so do not hand
+                    // anything over and do not retry. Stop the walk to avoid compounding it.
+                    reportUncertain(id, "claiming owed item " + row.id(), failure,
+                            "That item may or may not have been claimed; run /market claim again "
+                                    + "in a moment and tell an admin if it looks wrong.");
+                });
+    }
+
+    /**
+     * Puts a just-claimed row's item into the player's inventory. The row was marked claimed by
+     * {@link MarketService#claimOne} before this runs, and space was checked before that, so the
+     * item all but always fits here. The one exception is the player having filled the inventory
+     * during the claim's writer-thread round trip: the item is then re-held for claim rather than
+     * dropped or lost, because it is already off the {@code pending_items} row it came from.
+     */
+    private void deliverClaimed(UUID id, PendingItemRow claimed) {
+        Player online = plugin.getServer().getPlayer(id);
+        ItemStack stack = BukkitItemCodec.decode(claimed.itemBytes());
+        if (online != null && fitsWholly(online, stack)) {
+            online.getInventory().addItem(stack);
+            message(id, text("Claimed: " + claimed.summary(), NamedTextColor.AQUA));
+            return;
+        }
+        // Claimed but no longer fits (or the player just left): re-hold so nothing is lost.
+        holdForClaim(id, stack, claimed.amount(), claimed.summary(), "RECLAIM",
+                "Your inventory filled up, so " + claimed.summary()
+                        + " is waiting in /market claim again.");
+    }
+
+    // ---- deliver-or-hold --------------------------------------------------------------
+
+    /**
+     * Hands {@code stack} to the player if they are online and it fits wholly; otherwise holds it
+     * for {@code /market claim}. A valuable unique is never dropped on the ground here: an item
+     * dropped for an offline or full recipient despawns, and the whole point of the claim path is
+     * that a unique survives until its owner can take it.
+     *
+     * <p>Called only after the money-moving operation that produced the item has already committed
+     * (a sale, a cancellation), so this method's job is delivery, not the transaction.
+     */
+    private void deliverItemOrHold(UUID id, ItemStack stack, int amount, String summary,
+            String reason) {
+        Player online = plugin.getServer().getPlayer(id);
+        if (online != null && fitsWholly(online, stack)) {
+            online.getInventory().addItem(stack);
+            return;
+        }
+        holdForClaim(id, stack, amount, summary, reason,
+                "Your inventory was full, so it is waiting in /market claim.");
+    }
+
+    /**
+     * Records an item as owed to the player through the market, then tells them where to find it.
+     * If even that insert is refused, the item bytes are still recoverable from the {@code SOLD} or
+     * {@code CANCELLED} listing row they came from, so this reports an uncertain escrow rather than
+     * dropping or duplicating anything.
+     */
+    private void holdForClaim(UUID id, ItemStack stack, int amount, String summary, String reason,
+            String heldNote) {
+        holdBytesForClaim(id, stack.serializeAsBytes(), amount, summary, reason, heldNote);
+    }
+
+    /**
+     * The raw-bytes core of {@link #holdForClaim}: records item bytes as owed even when no
+     * {@link ItemStack} can be built from them.
+     *
+     * <p>This is the path a <em>post-commit</em> decode failure on {@code buy} or {@code cancel}
+     * takes. The sale or cancellation is already final and the bytes are all that survive of a
+     * unique whose registry changed under it (a Paper upgrade while it sat listed), so they are
+     * held verbatim for {@code /market claim} rather than lost -- the {@code pending_items} row
+     * stores {@code item_bytes} regardless of whether a stack can be decoded, and {@code claimNext}
+     * guards decode on the claim side, so a permanently-undecodable row is skipped-and-logged there
+     * and never handed over as a broken item. If even this insert is refused, the bytes remain on
+     * the {@code SOLD}/{@code CANCELLED} listing row they came from, so this reports an uncertain
+     * escrow rather than dropping or duplicating anything. No money moves on this path.
+     */
+    private void holdBytesForClaim(UUID id, byte[] bytes, int amount, String summary, String reason,
+            String heldNote) {
+        onMainThread(market.holdForClaim(id, bytes, amount, summary, reason,
+                System.currentTimeMillis()), id, "holding " + summary + " for claim",
+                (pendingId, failure) -> {
+                    if (failure == null) {
+                        message(id, text(heldNote, NamedTextColor.YELLOW));
+                        return;
+                    }
+                    reportUncertain(id, "holding " + summary + " for claim", failure,
+                            "Your item could not be placed in /market claim right now. It is not "
+                                    + "lost -- an admin can recover it -- so please tell one.");
+                });
+    }
+
+    /**
+     * Whether {@code stack} fits <em>wholly</em> in the player's storage slots, counting empty
+     * slots and room in similar partial stacks. Checked before delivery so an item is never split
+     * -- half handed over, half held -- which would break the claim path's all-or-nothing contract.
+     */
+    private static boolean fitsWholly(Player player, ItemStack stack) {
+        int need = stack.getAmount();
+        int max = stack.getMaxStackSize();
+        for (ItemStack slot : player.getInventory().getStorageContents()) {
+            if (slot == null || slot.getType().isAir()) {
+                need -= max;
+            } else if (slot.isSimilar(stack)) {
+                need -= Math.max(0, max - slot.getAmount());
+            }
+            if (need <= 0) {
+                return true;
+            }
+        }
+        return need <= 0;
+    }
+
+    private static String plural(int count) {
+        return count == 1 ? "" : "s";
+    }
+
     // ---- reload -----------------------------------------------------------------------
 
     private void reload(CommandSender sender) {
@@ -561,6 +1067,34 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
         }
     }
 
+    /**
+     * Returns a listed item to a player after a refused listing: into their inventory if they are
+     * still online, and on the ground where they ran the command if they are not or it will not
+     * fit. Unlike the claim path, a refused <em>sell</em> is a straight hand-back to a player who
+     * is almost always standing right there, so a drop is the correct last resort here rather than
+     * a held claim -- the item was in their hand a moment ago and is going straight back.
+     */
+    private void giveOrDrop(UUID id, Location where, ItemStack stack) {
+        Player online = plugin.getServer().getPlayer(id);
+        if (online == null) {
+            dropAt(where, stack);
+            return;
+        }
+        for (ItemStack notAdded : online.getInventory().addItem(stack).values()) {
+            dropAt(online.getLocation(), notAdded);
+        }
+    }
+
+    /** Puts a single item stack on the ground at {@code where}, the last resort for a returned item. */
+    private void dropAt(Location where, ItemStack stack) {
+        if (where == null || where.getWorld() == null) {
+            log.severe("FarmersMarket: had to drop a " + stack.getType() + " x" + stack.getAmount()
+                    + " but no world was available to drop it in; it is lost. This should not happen.");
+            return;
+        }
+        where.getWorld().dropItemNaturally(where, stack);
+    }
+
     // ---- plumbing ----------------------------------------------------------------------
 
     /**
@@ -604,6 +1138,33 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                 // Losing the race against disable, almost always. Never swallowed silently.
                 log.log(Level.WARNING, "FarmersMarket: could not schedule a ledger result back "
                         + "onto the main thread.", e);
+            }
+        });
+    }
+
+    /**
+     * The read-only sibling of {@link #onMainThread}: schedules {@code handler} back onto the main
+     * thread when {@code future} settles, so a read that the console may also run can send its
+     * lines to a {@link CommandSender} rather than to a player resolved by UUID.
+     *
+     * <p>There is no shutdown-reconciliation log line here on purpose. Every future routed through
+     * this helper is a <em>read</em> -- browse, info, mine, pot, and the pending-items list -- so a
+     * result that settles after the plugin was disabled moved no money and owes nobody anything;
+     * dropping it silently is correct, where a money op dropping silently is the exact thing the
+     * other seam logs about.
+     */
+    private <T> void onMainThreadForSender(CompletableFuture<T> future, CommandSender sender,
+                                           BiConsumer<T, Throwable> handler) {
+        future.whenComplete((value, failure) -> {
+            Throwable cause = unwrap(failure);
+            if (!plugin.isEnabled()) {
+                return;
+            }
+            try {
+                plugin.getServer().getScheduler().runTask(plugin, () -> handler.accept(value, cause));
+            } catch (RuntimeException e) {
+                log.log(Level.WARNING, "FarmersMarket: could not schedule a market read back onto "
+                        + "the main thread.", e);
             }
         });
     }

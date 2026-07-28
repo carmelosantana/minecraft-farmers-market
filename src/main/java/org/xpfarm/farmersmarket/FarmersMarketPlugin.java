@@ -32,6 +32,8 @@ import org.xpfarm.farmersmarket.config.BukkitConfigSource;
 import org.xpfarm.farmersmarket.config.FmConfig;
 import org.xpfarm.farmersmarket.identity.EditionResolver;
 import org.xpfarm.farmersmarket.ledger.Ledger;
+import org.xpfarm.farmersmarket.market.MarketDao;
+import org.xpfarm.farmersmarket.market.MarketService;
 import org.xpfarm.farmersmarket.storage.AccountDao;
 import org.xpfarm.farmersmarket.storage.Database;
 import org.xpfarm.farmersmarket.storage.DatabaseExecutor;
@@ -70,6 +72,15 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
     /** The SQLite file inside the plugin's data folder. */
     private static final String DATABASE_FILE = "market.db";
 
+    /** How often the expiry sweep runs, in server ticks: every ten minutes (20 ticks/second). */
+    private static final long EXPIRY_SWEEP_PERIOD_TICKS = 20L * 60L * 10L;
+
+    /** The first expiry sweep runs shortly after enable rather than immediately, in ticks. */
+    private static final long EXPIRY_SWEEP_INITIAL_DELAY_TICKS = 20L * 30L;
+
+    /** The most listings one expiry sweep flips, so a long-idle server's first pass stays bounded. */
+    private static final int EXPIRY_SWEEP_BATCH = 200;
+
     /**
      * The live configuration snapshot. Held in an {@link AtomicReference} because
      * {@code /market reload} replaces it wholesale from the main thread while other threads may
@@ -81,6 +92,7 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
     private Database database;
     private DatabaseExecutor executor;
     private Ledger ledger;
+    private MarketService market;
     private EditionResolver editions;
 
     @Override
@@ -103,7 +115,11 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
 
             stage = "starting its database writer thread";
             executor = new DatabaseExecutor();
-            ledger = new Ledger(database, new AccountDao(database), executor);
+            AccountDao accountDao = new AccountDao(database);
+            ledger = new Ledger(database, accountDao, executor);
+
+            stage = "wiring the market";
+            market = new MarketService(database, executor, accountDao, new MarketDao(database));
 
             // Inside the try, not after it. EditionResolver.create catches
             // ReflectiveOperationException and RuntimeException but not Error, so a
@@ -120,12 +136,20 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
                 throw new IllegalStateException("the 'market' command is missing from plugin.yml, "
                         + "so there is no way to reach anything this plugin does");
             }
-            MarketCommand market = new MarketCommand(this, ledger, this::reload);
-            command.setExecutor(market);
-            command.setTabCompleter(market);
+            MarketCommand marketCommand =
+                    new MarketCommand(this, ledger, market, this::config, this::reload);
+            command.setExecutor(marketCommand);
+            command.setTabCompleter(marketCommand);
 
             stage = "registering its player-join listener";
             getServer().getPluginManager().registerEvents(this, this);
+
+            // Guarded like every step above: a scheduling failure disables the plugin cleanly
+            // rather than leaving it half-wired. The sweep itself does its work on the executor
+            // and never blocks this scheduler thread on the future.
+            stage = "scheduling the listing-expiry sweep";
+            getServer().getScheduler().runTaskTimerAsynchronously(this, this::sweepExpiredListings,
+                    EXPIRY_SWEEP_INITIAL_DELAY_TICKS, EXPIRY_SWEEP_PERIOD_TICKS);
         } catch (Throwable t) {
             // Throwable, not Exception: an UnsatisfiedLinkError from sqlite-jdbc failing to
             // extract its native library into a noexec tmpdir is an Error, and it is the single
@@ -162,7 +186,39 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
             database = null;
         }
         ledger = null;
+        market = null;
         editions = null;
+    }
+
+    /**
+     * One pass of the listing-expiry sweep: flips {@code ACTIVE} listings whose duration has
+     * lapsed to {@code EXPIRED} and moves each one's escrowed item into {@code /market claim} for
+     * its seller. Runs on a scheduler thread, hands the real work to the database writer thread via
+     * {@link MarketService#expireDue}, and never blocks waiting on the future -- it only attaches a
+     * completion that logs the swept count at {@code FINE} and any failure at {@code WARNING}.
+     *
+     * <p>A missed or failed sweep is harmless and self-correcting: a listing that should have
+     * expired simply stays on sale until the next pass, and no money or item is at risk because the
+     * item is still safely escrowed in its listing row.
+     */
+    private void sweepExpiredListings() {
+        MarketService current = market;
+        if (current == null) {
+            return;
+        }
+        current.expireDue(System.currentTimeMillis(), EXPIRY_SWEEP_BATCH)
+                .whenComplete((swept, failure) -> {
+                    if (failure != null) {
+                        getLogger().log(Level.WARNING, "FarmersMarket: the listing-expiry sweep "
+                                + "failed. Expired listings stay on sale until the next sweep; no "
+                                + "item or money is at risk, as each is still escrowed.", failure);
+                        return;
+                    }
+                    if (swept != null && swept > 0) {
+                        getLogger().fine("FarmersMarket: expiry sweep moved " + swept
+                                + " lapsed listing(s) to /market claim.");
+                    }
+                });
     }
 
     /**

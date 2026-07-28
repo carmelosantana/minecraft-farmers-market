@@ -18,6 +18,7 @@ import java.util.function.Predicate;
 
 import org.xpfarm.farmersmarket.ledger.Diamonds;
 import org.xpfarm.farmersmarket.ledger.LedgerException;
+import org.xpfarm.farmersmarket.market.MarketException;
 
 /**
  * Every decision {@code /market} makes, as pure functions.
@@ -64,7 +65,7 @@ public final class MarketResolver {
     private MarketResolver() {
     }
 
-    /** The four subcommands M1 implements. */
+    /** Every subcommand {@code /market} understands. */
     public enum Sub {
 
         /** {@code /market balance}, and the meaning of a bare {@code /market}. */
@@ -75,6 +76,30 @@ public final class MarketResolver {
 
         /** {@code /market withdraw <qty>}. */
         WITHDRAW("withdraw", USE_PERMISSION, true),
+
+        /** {@code /market sell <price>}, listing the held item; needs an inventory to take it from. */
+        SELL("sell", USE_PERMISSION, true),
+
+        /** {@code /market browse [page]}, a read-only view the console may run. */
+        BROWSE("browse", USE_PERMISSION, false),
+
+        /** {@code /market info <id>}, a read-only view the console may run. */
+        INFO("info", USE_PERMISSION, false),
+
+        /** {@code /market buy <id>}, which moves money and so needs a player. */
+        BUY("buy", USE_PERMISSION, true),
+
+        /** {@code /market cancel <id>}, which returns an item and so needs a player. */
+        CANCEL("cancel", USE_PERMISSION, true),
+
+        /** {@code /market mine}, listing the sender's own active listings; needs a player. */
+        MINE("mine", USE_PERMISSION, true),
+
+        /** {@code /market claim}, collecting proceeds and returns into an inventory. */
+        CLAIM("claim", USE_PERMISSION, true),
+
+        /** {@code /market pot}, a read-only view of the community pot the console may run. */
+        POT("pot", USE_PERMISSION, false),
 
         /** {@code /market reload}, deliberately runnable from the console over RCON. */
         RELOAD("reload", RELOAD_PERMISSION, false);
@@ -120,11 +145,20 @@ public final class MarketResolver {
         /** A player-only subcommand run from the console. */
         CONSOLE_NEEDS_PLAYER,
 
-        /** {@code withdraw} with no amount, which has no sensible default. */
+        /** {@code withdraw} or {@code sell} with no amount, which has no sensible default. */
         MISSING_AMOUNT,
 
-        /** An amount that is not a whole, positive, representable number of diamonds. */
+        /** An amount that is not a positive, representable number of diamonds. */
         BAD_AMOUNT,
+
+        /** A subcommand that needs a listing id was given none. */
+        MISSING_ID,
+
+        /** A listing id that is not a positive whole number. */
+        BAD_ID,
+
+        /** A browse page that is not a positive whole number. */
+        BAD_PAGE,
 
         /** Show the sender's balance and experience. */
         BALANCE,
@@ -138,6 +172,30 @@ public final class MarketResolver {
         /** Withdraw {@link Resolution#diamonds()} diamonds. */
         WITHDRAW_AMOUNT,
 
+        /** List the held item at {@link Resolution#priceDust()} dust. */
+        SELL,
+
+        /** Show {@link Resolution#page()} of the listings on sale. */
+        BROWSE,
+
+        /** Show the listing with {@link Resolution#listingId()}. */
+        INFO,
+
+        /** Buy the listing with {@link Resolution#listingId()}. */
+        BUY,
+
+        /** Cancel the listing with {@link Resolution#listingId()}. */
+        CANCEL,
+
+        /** Show the sender's own active listings. */
+        MINE,
+
+        /** Collect the sender's proceeds and returns. */
+        CLAIM,
+
+        /** Show the community pot. */
+        POT,
+
         /** Re-read {@code config.yml}. */
         RELOAD;
 
@@ -145,25 +203,47 @@ public final class MarketResolver {
         public boolean isError() {
             return this == UNKNOWN_SUBCOMMAND || this == TOO_MANY_ARGUMENTS
                     || this == NO_PERMISSION || this == CONSOLE_NEEDS_PLAYER
-                    || this == MISSING_AMOUNT || this == BAD_AMOUNT;
+                    || this == MISSING_AMOUNT || this == BAD_AMOUNT
+                    || this == MISSING_ID || this == BAD_ID || this == BAD_PAGE;
         }
     }
 
     /**
      * A resolved invocation.
      *
-     * @param outcome  what to do, or why not
-     * @param diamonds the whole number of diamonds involved, for {@link Outcome#DEPOSIT_AMOUNT}
-     *                 and {@link Outcome#WITHDRAW_AMOUNT}; {@code 0} otherwise
-     * @param message  the message to show, for every {@linkplain Outcome#isError() error}
-     *                 outcome and {@code null} otherwise
+     * <p>Only one of the numeric carriers is meaningful for any given outcome, and which one is
+     * fixed by the outcome: a resolution never has both a listing id and a page. The unused
+     * carriers are zero rather than an {@code Optional} each, because the caller already switches
+     * on {@link #outcome()} and reads only the field that outcome documents.
+     *
+     * @param outcome   what to do, or why not
+     * @param diamonds  the whole number of diamonds involved, for {@link Outcome#DEPOSIT_AMOUNT}
+     *                  and {@link Outcome#WITHDRAW_AMOUNT}; {@code 0} otherwise
+     * @param priceDust the sell price in dust, for {@link Outcome#SELL}; {@code 0} otherwise. A
+     *                  sell price may be fractional, so this is carried as dust rather than as a
+     *                  whole-diamond count
+     * @param listingId the listing id, for {@link Outcome#INFO}, {@link Outcome#BUY}, and
+     *                  {@link Outcome#CANCEL}; {@code 0} otherwise
+     * @param page      the one-based page, for {@link Outcome#BROWSE}; {@code 0} otherwise
+     * @param message   the message to show, for every {@linkplain Outcome#isError() error}
+     *                  outcome and {@code null} otherwise
      */
-    public record Resolution(Outcome outcome, long diamonds, String message) {
+    public record Resolution(Outcome outcome, long diamonds, long priceDust, long listingId,
+                             int page, String message) {
+
+        /**
+         * A resolution that carries only a diamond count or a message, for the balance, deposit,
+         * withdraw, reload, and every-error path that predates the market subcommands.
+         */
+        public Resolution(Outcome outcome, long diamonds, String message) {
+            this(outcome, diamonds, 0L, 0L, 0, message);
+        }
     }
 
-    /** The usage line, matching {@code plugin.yml}'s {@code usage:} exactly. */
+    /** The usage line, naming the subcommands that exist. */
     public static String usage() {
-        return "Usage: /market [balance | deposit | withdraw | reload]";
+        return "Usage: /market [balance | deposit | withdraw | sell | browse | info | buy "
+                + "| cancel | mine | claim | pot | reload]";
     }
 
     /** Resolves a typed token to a subcommand, case-insensitively. */
@@ -223,6 +303,20 @@ public final class MarketResolver {
                     : new Resolution(Outcome.BALANCE, 0L, null);
             case DEPOSIT -> resolveDeposit(tokens);
             case WITHDRAW -> resolveWithdraw(tokens);
+            case SELL -> resolveSell(tokens);
+            case BROWSE -> resolveBrowse(tokens);
+            case INFO -> resolveId(tokens, Sub.INFO, Outcome.INFO);
+            case BUY -> resolveId(tokens, Sub.BUY, Outcome.BUY);
+            case CANCEL -> resolveId(tokens, Sub.CANCEL, Outcome.CANCEL);
+            case MINE -> tokens.length > 1
+                    ? tooMany(sub)
+                    : new Resolution(Outcome.MINE, 0L, null);
+            case CLAIM -> tokens.length > 1
+                    ? tooMany(sub)
+                    : new Resolution(Outcome.CLAIM, 0L, null);
+            case POT -> tokens.length > 1
+                    ? tooMany(sub)
+                    : new Resolution(Outcome.POT, 0L, null);
             case RELOAD -> tokens.length > 1
                     ? tooMany(sub)
                     : new Resolution(Outcome.RELOAD, 0L, null);
@@ -250,6 +344,100 @@ public final class MarketResolver {
                     "How many? Try /market withdraw 64.");
         }
         return amount(tokens[1], Outcome.WITHDRAW_AMOUNT);
+    }
+
+    private static Resolution resolveSell(String[] tokens) {
+        if (tokens.length > 2) {
+            return tooMany(Sub.SELL);
+        }
+        if (tokens.length == 1) {
+            return error(Outcome.MISSING_AMOUNT, "For how much? Try /market sell 10.");
+        }
+        return price(tokens[1]);
+    }
+
+    private static Resolution resolveBrowse(String[] tokens) {
+        if (tokens.length > 2) {
+            return tooMany(Sub.BROWSE);
+        }
+        if (tokens.length == 1) {
+            return new Resolution(Outcome.BROWSE, 0L, 0L, 0L, 1, null);
+        }
+        return page(tokens[1]);
+    }
+
+    private static Resolution resolveId(String[] tokens, Sub sub, Outcome onSuccess) {
+        if (tokens.length > 2) {
+            return tooMany(sub);
+        }
+        if (tokens.length == 1) {
+            return error(Outcome.MISSING_ID,
+                    "Which listing? Its number is shown by /market browse.");
+        }
+        return listingId(tokens[1], onSuccess);
+    }
+
+    /**
+     * Parses a typed sell price as an amount of diamonds.
+     *
+     * <p>Unlike {@link #amount}, a price may be fractional: a price is a number the market records,
+     * not a count of physical items to move, so {@code 1.5} is a real price of a diamond and a
+     * half. The parse still goes through {@link Diamonds#parse}, so exponents, signs, hex, and
+     * over-long numbers are refused by the same grammar the ledger uses. A price of zero moves an
+     * item for nothing, which is a giveaway dressed as a sale, so it is refused rather than
+     * accepted.
+     */
+    static Resolution price(String raw) {
+        Diamonds parsed;
+        try {
+            parsed = Diamonds.parse(raw);
+        } catch (LedgerException e) {
+            return error(Outcome.BAD_AMOUNT, messageFor(e.reason(), null));
+        }
+        if (parsed.dust() <= 0L) {
+            return error(Outcome.BAD_AMOUNT, "A price must be more than zero.");
+        }
+        return new Resolution(Outcome.SELL, 0L, parsed.dust(), 0L, 0, null);
+    }
+
+    /**
+     * Parses a typed listing id as a positive {@code long}.
+     *
+     * <p>An id names a row the market assigns, so it is a whole number and it is positive -- id
+     * {@code 0} is no listing and a negative id is nonsense. The number is parsed strictly: a
+     * value too large for a {@code long} is refused rather than wrapped, exactly as an amount is.
+     */
+    static Resolution listingId(String raw, Outcome onSuccess) {
+        long id;
+        try {
+            id = Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            return error(Outcome.BAD_ID, "A listing number is a whole number, like 7.");
+        }
+        if (id <= 0L) {
+            return error(Outcome.BAD_ID, "A listing number is a whole number, like 7.");
+        }
+        return new Resolution(onSuccess, 0L, 0L, id, 0, null);
+    }
+
+    /**
+     * Parses a typed browse page as a positive {@code int}.
+     *
+     * <p>Pages are one-based, so page {@code 0} does not exist and is refused rather than treated
+     * as the first page -- a player who typed it meant something, and silently showing page one
+     * hides the typo.
+     */
+    static Resolution page(String raw) {
+        int page;
+        try {
+            page = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            return error(Outcome.BAD_PAGE, "A page is a whole number, like 1.");
+        }
+        if (page <= 0) {
+            return error(Outcome.BAD_PAGE, "A page is a whole number, like 1.");
+        }
+        return new Resolution(Outcome.BROWSE, 0L, 0L, 0L, page, null);
     }
 
     /**
@@ -305,6 +493,38 @@ public final class MarketResolver {
             // there. "Nothing changed" is the whole difference between the two sentences.
             case NOTHING_WRITTEN -> "The market could not be reached, so nothing was changed. "
                     + "Try again in a moment.";
+        };
+    }
+
+    /**
+     * The one sentence a player is shown for each way a market operation can refuse.
+     *
+     * <p>The mapping lives here for the same reason its ledger counterpart does: a
+     * {@link MarketException} carries a {@link MarketException.Reason}, not text, because the
+     * market package has no idea what locale or chat platform it is writing to. Turning a reason
+     * into a sentence is a decision, and every decision {@code /market} makes is a pure function
+     * in this class so a test can pin it.
+     *
+     * @param reason why the market refused; never {@code null}
+     * @return the message; plain text, no colour codes -- the caller owns presentation
+     */
+    public static String messageFor(MarketException.Reason reason) {
+        Objects.requireNonNull(reason, "reason");
+        return switch (reason) {
+            case LISTING_UNAVAILABLE -> "That listing is no longer available.";
+            case SELF_PURCHASE -> "You cannot buy your own listing.";
+            case INSUFFICIENT_FUNDS ->
+                    "You do not have enough diamonds. Deposit some with /market deposit.";
+            case NOT_YOUR_LISTING -> "That is not your listing.";
+            case TOO_MANY_LISTINGS -> "You have too many listings up. Cancel or sell one first.";
+            case COMMODITY_NOT_YET -> "Only unique items -- enchanted, renamed, damaged, or "
+                    + "custom -- can be listed right now. Bulk trading is coming soon.";
+            // Same wording as the ledger's NOTHING_WRITTEN, and for the same reason: the market
+            // sets it only when it knows the write never started, so the player is owed a definite
+            // "nothing changed" rather than the go-and-check uncertainty message.
+            case NOTHING_WRITTEN -> "The market could not be reached, so nothing was changed. "
+                    + "Try again in a moment.";
+            case AMOUNT_TOO_LARGE -> "That amount is too large.";
         };
     }
 

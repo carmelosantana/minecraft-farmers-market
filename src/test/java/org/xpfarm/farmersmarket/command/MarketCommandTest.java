@@ -33,6 +33,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import org.xpfarm.farmersmarket.ledger.Ledger;
 import org.xpfarm.farmersmarket.ledger.LedgerException;
+import org.xpfarm.farmersmarket.market.MarketDao;
+import org.xpfarm.farmersmarket.market.MarketService;
 import org.xpfarm.farmersmarket.storage.AccountDao;
 import org.xpfarm.farmersmarket.storage.Database;
 import org.xpfarm.farmersmarket.storage.DatabaseExecutor;
@@ -177,9 +179,12 @@ final class MarketCommandTest {
         try (Database database = Database.open(dir.resolve("market.db"), dir.resolve("tmp").toString(), 5000);
                 DatabaseExecutor executor = new DatabaseExecutor()) {
             Migrations.applyTo(database.connection());
-            Ledger ledger = new Ledger(database, new AccountDao(database), executor);
+            AccountDao accountDao = new AccountDao(database);
+            Ledger ledger = new Ledger(database, accountDao, executor);
+            MarketService market =
+                    new MarketService(database, executor, accountDao, new MarketDao(database));
 
-            MarketCommand command = new MarketCommand(plugin, ledger, List::of);
+            MarketCommand command = new MarketCommand(plugin, ledger, market, () -> null, List::of);
 
             Field field = MarketCommand.class.getDeclaredField("log");
             field.setAccessible(true);

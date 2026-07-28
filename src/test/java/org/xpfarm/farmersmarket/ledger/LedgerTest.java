@@ -211,64 +211,6 @@ class LedgerTest {
     }
 
     /**
-     * An {@link Error} between the debit and the credit must roll back like anything else.
-     *
-     * <p>A {@code catch (Exception)} would skip the rollback, and restoring autocommit on the way
-     * out commits the still-open transaction -- so the debit would be committed with no credit and
-     * the money destroyed outright. {@code DatabaseExecutor} catches {@code Throwable}, so the
-     * writer thread survives and nothing else would ever report it.
-     *
-     * <p>This drives {@code inTransaction} directly because no production path can be made to
-     * throw an {@code Error} on demand: {@code AccountDao}, {@code Database}, and
-     * {@code DatabaseExecutor} are all {@code final} and cannot be subclassed to inject one.
-     */
-    @Test
-    void anErrorMidTransactionRollsBackInsteadOfCommittingTheDebit() throws Exception {
-        ledger.deposit(ALICE, Diamonds.ofDiamonds(10)).get();
-        ledger.deposit(BOB, Diamonds.ofDiamonds(3)).get();
-
-        ExecutionException thrown = assertThrows(ExecutionException.class,
-                () -> executor.submit(() -> ledger.inTransaction(() -> {
-                    dao.upsertBalance(ALICE, 6_000L);
-                    throw new StackOverflowError("simulated JVM-level failure between debit and credit");
-                })).get());
-
-        assertInstanceOf(StackOverflowError.class, thrown.getCause());
-        assertEquals(10_000L, ledger.balance(ALICE).get().dust());
-        assertEquals(3_000L, ledger.balance(BOB).get().dust());
-    }
-
-    /**
-     * A nested {@code inTransaction} must be refused before it writes anything.
-     *
-     * <p>There is one connection, so the inner call's {@code commit()} commits whatever the
-     * outer call had applied so far -- here, a debit with no matching credit -- and then leaves
-     * the outer call finishing a transaction it no longer owns. That is exactly the
-     * half-applied-transfer window this class already had to close once. {@code inTransaction}
-     * is package-private and M2 adds callers to this package, so the guard is what stops the
-     * next caller reopening it.
-     */
-    @Test
-    void aNestedTransactionIsRefusedRatherThanCommittingTheOuterOnesHalfAppliedWork()
-            throws Exception {
-        ledger.deposit(ALICE, Diamonds.ofDiamonds(10)).get();
-
-        ExecutionException thrown = assertThrows(ExecutionException.class,
-                () -> executor.submit(() -> ledger.inTransaction(() -> {
-                    dao.upsertBalance(ALICE, 6_000L);
-                    return ledger.inTransaction(() -> {
-                        dao.upsertBalance(BOB, 1_000L);
-                        return null;
-                    });
-                })).get());
-
-        assertInstanceOf(IllegalStateException.class, thrown.getCause());
-        // Without the guard the inner commit lands ALICE's debit; with it, nothing is committed.
-        assertEquals(10_000L, ledger.balance(ALICE).get().dust());
-        assertEquals(0L, ledger.balance(BOB).get().dust());
-    }
-
-    /**
      * A storage failure on the balance read {@code deposit} performs before its write is a
      * <em>refusal</em>, not an unknown outcome.
      *

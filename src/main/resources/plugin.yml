@@ -25,7 +25,7 @@ libraries:
 commands:
   market:
     description: Check your diamond balance, deposit diamonds, and withdraw them again
-    usage: /market [balance | deposit | withdraw | reload]
+    usage: /market [balance | deposit | withdraw | sell | browse | info | buy | cancel | mine | claim | pot | reload]
     aliases: [mkt, fm]
 
 permissions:
