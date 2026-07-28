@@ -451,17 +451,19 @@ The market's entire trade loop needs a player inventory, so it is unreachable he
 Gate 8a complete `2026-07-21`. Gate 8b belongs to `minecraft-plugin-release`.
 
 - [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior. `.github/workflows/build.yml` was copied from `timber-blast` and verified **byte-identical** by `diff`, so it carries the corrected `SHA256SUMS.txt` generation that records bare filenames rather than `target/`-prefixed paths.
-- [x] Successful main Actions run is recorded before tagging. Recorded at gate 8b on `2026-07-22`: the `main` run for commit **`f6143cc`** completed `success`, and that is the exact commit `v0.1.0` tags. The worktree was clean and `HEAD` matched at tag time. An earlier green run on `72bb3e9` was deliberately **not** tagged — a checklist correction landed after it, so tagging `72bb3e9` would have put the tag on a commit that was no longer `HEAD`, and tagging the new commit without re-verifying would have tagged something CI had never seen. The pipeline waited for the second run instead.
+- [x] Successful main Actions run is recorded before tagging. Recorded at gate 8b on `2026-07-22`: the `main` run for commit **`f6143cc`** completed `success`, and that is the exact commit `v0.1.0` tags. The worktree was clean and `HEAD` matched at tag time. An earlier green run on `72bb3e9` was deliberately **not** tagged — a checklist correction landed after it, so tagging `72bb3e9` would have put the tag on a commit that was no longer `HEAD`, and tagging the new commit without re-verifying would have tagged something CI had never seen. The pipeline waited for the second run instead. **`0.2.0` re-recorded** `2026-07-28`: the `main` run for commit **`106a9bd`** (run `30389168771`) completed `success`, and that is the exact commit `v0.2.0` tags; worktree clean and `HEAD` matched at tag time.
 - [x] Workflow permissions contain no broader access than the documented contract. `permissions: contents: write`, and nothing else.
 
 ## 9. Release
 
-Gate 9 complete `2026-07-22`. Release: https://github.com/carmelosantana/minecraft-farmers-market/releases/tag/v0.1.0
+Gate 9 complete `2026-07-22` (v0.1.0) and `2026-07-28` (v0.2.0). Releases:
+https://github.com/carmelosantana/minecraft-farmers-market/releases/tag/v0.1.0 ·
+https://github.com/carmelosantana/minecraft-farmers-market/releases/tag/v0.2.0
 
-- [x] Semantic version matches the POM, plugin metadata, and `v<version>` tag. `pom.xml` `<version>0.1.0</version>`; the embedded `plugin.yml` in the shaded JAR reads `version: '0.1.0'` (Maven resource filtering, never hand-edited); tag `v0.1.0`. All three agree.
-- [x] Successful tag Actions run and GitHub release are recorded. Tag run on `f6143cc` completed `success`. The release is **stable and non-prerelease** (`isDraft=false`, `isPrerelease=false`), created by the workflow rather than by hand.
-- [x] Release contains exactly one updater-matching JAR plus `SHA256SUMS.txt` and no `original-*` JAR. Exactly two assets: `farmers-market-0.1.0.jar` (71,961 bytes) and `SHA256SUMS.txt` (91 bytes). Zero `original-*` entries.
-- [x] Downloaded release assets pass `sha256sum --check SHA256SUMS.txt`. Downloaded to a fresh flat directory and verified: `farmers-market-0.1.0.jar: OK`. The manifest records a bare filename, not a `target/`-prefixed path — the defect that made this check fail for every plugin released before `2026-07-19`.
+- [x] Semantic version matches the POM, plugin metadata, and `v<version>` tag. `pom.xml` `<version>0.1.0</version>`; the embedded `plugin.yml` in the shaded JAR reads `version: '0.1.0'` (Maven resource filtering, never hand-edited); tag `v0.1.0`. All three agree. **`0.2.0`:** `pom.xml` `<version>0.2.0</version>`, embedded `plugin.yml` `version: '0.2.0'`, tag `v0.2.0` — all three agree.
+- [x] Successful tag Actions run and GitHub release are recorded. Tag run on `f6143cc` completed `success`. The release is **stable and non-prerelease** (`isDraft=false`, `isPrerelease=false`), created by the workflow rather than by hand. **`0.2.0`:** tag run `30389250871` completed `success`; release `v0.2.0` is stable/non-prerelease (`draft: false`, `prerelease: false`), authored by `github-actions[bot]`, published `2026-07-28`.
+- [x] Release contains exactly one updater-matching JAR plus `SHA256SUMS.txt` and no `original-*` JAR. Exactly two assets: `farmers-market-0.1.0.jar` (71,961 bytes) and `SHA256SUMS.txt` (91 bytes). Zero `original-*` entries. **`0.2.0`:** exactly two assets — `farmers-market-0.2.0.jar` (118,239 bytes) and `SHA256SUMS.txt` (91 bytes); zero `original-*` entries.
+- [x] Downloaded release assets pass `sha256sum --check SHA256SUMS.txt`. Downloaded to a fresh flat directory and verified: `farmers-market-0.1.0.jar: OK`. The manifest records a bare filename, not a `target/`-prefixed path — the defect that made this check fail for every plugin released before `2026-07-19`. **`0.2.0`:** downloaded to a fresh directory, `farmers-market-0.2.0.jar: OK`.
 
 ## 10. Updater
 
