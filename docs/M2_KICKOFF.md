@@ -51,7 +51,7 @@ The market. From §1: listings, item identity, commodity offer matching, escrow,
 Still M3-M5, do not build: any GUI or Cumulus form, vendors, `TextDisplay`, stalls, sealed bids,
 price history, indices, map charts.
 
-## STATUS: entry conditions MERGED. Next step is the M2 plan.
+## STATUS: M2 Part 1 plan written. Next step is to execute it.
 
 `main` is at **`26b2720`** (merge of `feat/m2-entry-conditions`), CI green, branch deleted.
 `v0.1.0` remains the released tag — the entry conditions are unreleased refactor work sitting on
@@ -63,10 +63,17 @@ overflow-checked `Diamonds` sum (never `AccountMerge`'s raw-long sum), and no pa
 after a possible commit — and confirmed the fifth hollow test was genuinely replaced by one the
 blind-`findLink` mutation kills. Full detail: `.superpowers/sdd/m2-entry-report.md`.
 
-**The next step is to write the M2 implementation plan** (task #15). The entry conditions are done;
-do not redo them. New API now available to M2: `AccountDao.upsertAccount(AccountRow)` /
-`findLink(UUID)`, `LedgerException.Reason.NOTHING_WRITTEN`, `Ledger.readBeforeWriting`, and a
-standalone `ConfigValidator` (M2 adds its keys' validation there, matching timber-blast's shape).
+**The M2 plan is written and split in two.** M2 ("the market") was large enough to warrant two
+plans, decided with the user on `2026-07-28`:
+
+- **Part 1 — spine & the unique market** (`0.2.0`): `docs/superpowers/plans/2026-07-28-farmers-market-m2-part1-unique-market.md`. Seven tasks. Builds the shared spine (a lifted `storage.TransactionRunner`, item identity via `serializeAsBytes`, the `listings`/`trades`/`pending_items` schema with append-only trade-log triggers and conservation `CHECK`s, XP listing fee, diamond sales tax with burn + community pot, the atomic sale) and the unique-item board with instant buyout, browse, cancel, expiry, and claim. A complete, shippable market. **This is the next thing to execute.**
+- **Part 2 — the commodity exchange** (`0.3.0`, a later plan, not yet written): anonymous buy/sell offer matching, partial fills, rolling buy limits, the server buy-back floor. Builds on Part 1's spine; `item_class` and the config keys are already in place for it.
+
+The **trade log lands in Part 1 with the first trade**, satisfying the never-later rule. New API M2
+consumes from the entry-condition work: `AccountDao.upsertAccount(AccountRow)` / `findLink(UUID)`,
+`LedgerException.Reason.NOTHING_WRITTEN`, `Ledger.readBeforeWriting`, and the standalone
+`ConfigValidator`. Part 1 adds **no** new config keys — `FmConfig` already parses every fee/tax/limit
+setting the market needs. The entry conditions are done; do not redo them.
 
 Two things were caught and fixed during the entry-condition work, both worth knowing:
 
