@@ -17,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.function.Predicate;
 
@@ -27,6 +28,7 @@ import org.xpfarm.farmersmarket.command.MarketResolver.Outcome;
 import org.xpfarm.farmersmarket.command.MarketResolver.Resolution;
 import org.xpfarm.farmersmarket.ledger.Diamonds;
 import org.xpfarm.farmersmarket.ledger.LedgerException;
+import org.xpfarm.farmersmarket.market.MarketException;
 
 /**
  * Everything {@code /market} decides before it touches a server.
@@ -54,6 +56,16 @@ final class MarketResolverTest {
 
     private static final boolean PLAYER = true;
     private static final boolean CONSOLE = false;
+
+    /** A use-permission player running {@code /market <args>}. */
+    private static Resolution resolvePlayer(String... args) {
+        return MarketResolver.resolve(args, PLAYER, ORDINARY_PLAYER);
+    }
+
+    /** The console running {@code /market <args>} with the same use permission granted. */
+    private static Resolution resolveConsole(String... args) {
+        return MarketResolver.resolve(args, CONSOLE, ORDINARY_PLAYER);
+    }
 
     @Nested
     final class Dispatch {
@@ -395,9 +407,13 @@ final class MarketResolverTest {
 
         @Test
         void onlySubcommandsTheSenderMayRunAreOffered() {
-            assertEquals(List.of("balance", "deposit", "withdraw"),
+            assertEquals(
+                    List.of("balance", "deposit", "withdraw", "sell", "browse", "info", "buy",
+                            "cancel", "mine", "claim", "pot"),
                     MarketResolver.complete(new String[] {""}, PLAYER, ORDINARY_PLAYER));
-            assertEquals(List.of("balance", "deposit", "withdraw", "reload"),
+            assertEquals(
+                    List.of("balance", "deposit", "withdraw", "sell", "browse", "info", "buy",
+                            "cancel", "mine", "claim", "pot", "reload"),
                     MarketResolver.complete(new String[] {""}, PLAYER, ADMIN));
             assertEquals(List.of(),
                     MarketResolver.complete(new String[] {""}, PLAYER, NOBODY));
@@ -405,7 +421,8 @@ final class MarketResolverTest {
 
         @Test
         void theConsoleIsOfferedOnlyWhatItCanActuallyRun() {
-            assertEquals(List.of("reload"),
+            // Only the read-only views and reload run without an inventory to act on.
+            assertEquals(List.of("browse", "info", "pot", "reload"),
                     MarketResolver.complete(new String[] {""}, CONSOLE, ADMIN));
         }
 
@@ -424,6 +441,60 @@ final class MarketResolverTest {
                     MarketResolver.complete(new String[] {"withdraw", ""}, PLAYER, ADMIN));
             assertEquals(List.of(),
                     MarketResolver.complete(new String[0], PLAYER, ADMIN));
+        }
+    }
+
+    @Nested
+    final class Market {
+
+        @Test
+        void sellParsesADiamondPrice() {
+            MarketResolver.Resolution r = resolvePlayer("sell", "100");
+            assertEquals(MarketResolver.Outcome.SELL, r.outcome());
+            assertEquals(100_000L, r.priceDust());
+        }
+
+        @Test
+        void sellRejectsAZeroOrMissingPrice() {
+            assertEquals(MarketResolver.Outcome.BAD_AMOUNT, resolvePlayer("sell", "0").outcome());
+            assertEquals(MarketResolver.Outcome.MISSING_AMOUNT, resolvePlayer("sell").outcome());
+        }
+
+        @Test
+        void buyAndInfoAndCancelParseAPositiveId() {
+            assertEquals(7L, resolvePlayer("buy", "7").listingId());
+            assertEquals(7L, resolvePlayer("info", "7").listingId());
+            assertEquals(7L, resolvePlayer("cancel", "7").listingId());
+            assertEquals(MarketResolver.Outcome.BAD_ID, resolvePlayer("buy", "0").outcome());
+            assertEquals(MarketResolver.Outcome.BAD_ID, resolvePlayer("buy", "-3").outcome());
+            assertEquals(MarketResolver.Outcome.BAD_ID, resolvePlayer("buy", "notanumber").outcome());
+            assertEquals(MarketResolver.Outcome.MISSING_ID, resolvePlayer("buy").outcome());
+        }
+
+        @Test
+        void browseDefaultsToPageOneAndParsesAPage() {
+            assertEquals(1, resolvePlayer("browse").page());
+            assertEquals(3, resolvePlayer("browse", "3").page());
+            assertEquals(MarketResolver.Outcome.BAD_PAGE, resolvePlayer("browse", "0").outcome());
+        }
+
+        @Test
+        void infoAndBrowseAndPotAreAllowedFromTheConsole() {
+            // Read-only market views do not need an inventory; only sell/buy/cancel/claim do.
+            assertNotEquals(MarketResolver.Outcome.CONSOLE_NEEDS_PLAYER, resolveConsole("browse").outcome());
+            assertNotEquals(MarketResolver.Outcome.CONSOLE_NEEDS_PLAYER, resolveConsole("pot").outcome());
+            assertEquals(MarketResolver.Outcome.CONSOLE_NEEDS_PLAYER, resolveConsole("sell", "10").outcome());
+            assertEquals(MarketResolver.Outcome.CONSOLE_NEEDS_PLAYER, resolveConsole("buy", "1").outcome());
+        }
+
+        @Test
+        void eachMarketRefusalHasItsOwnSentence() {
+            for (MarketException.Reason reason : MarketException.Reason.values()) {
+                assertNotNull(MarketResolver.messageFor(reason));
+                assertFalse(MarketResolver.messageFor(reason).isBlank());
+            }
+            assertTrue(MarketResolver.messageFor(MarketException.Reason.COMMODITY_NOT_YET)
+                    .toLowerCase(Locale.ROOT).contains("unique"));
         }
     }
 }
