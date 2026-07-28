@@ -51,7 +51,42 @@ The market. From §1: listings, item identity, commodity offer matching, escrow,
 Still M3-M5, do not build: any GUI or Cumulus form, vendors, `TextDisplay`, stalls, sealed bids,
 price history, indices, map charts.
 
-## STATUS: M2 Part 1 plan written. Next step is to execute it.
+## STATUS: M2 Part 1 built & merged to main (0.2.0). RELEASE BLOCKED on gate 7a.
+
+`main` is at **`fd0b781`** (merge of `feat/m2-part1-unique-market`), CI green, branch deleted.
+255 tests, every money-critical guard mutation-checked; whole-branch review clean (found and fixed
+two Important cross-package items — an unverified `tax=burned+pot` DB CHECK and an unguarded
+post-commit `decode` that could lose a bought item). `farmers-market-0.2.0.jar` builds. SDD ledger:
+`.superpowers/sdd/progress.md`.
+
+**The 0.2.0 release is HALTED at the `minecraft-plugin-release` gate check, correctly.** The
+checklist §7a records a runtime verification of **0.1.0 only** (it booted the 0.1.0 jar and exercised
+the ledger). The 0.2.0 **market has never run on a live server** — Migration 2 (v1→v2) applying,
+the plugin enabling with the new wiring, the expiry scheduler registering, and the whole
+sale/escrow/`serializeAsBytes`/XP-fee loop are runtime-only surfaces no unit test reaches. Under
+`autonomous` this still fails closed (autonomy removes prompts, not evidence). Nothing was tagged;
+the updater was not run (it needs a verified release).
+
+**Next area — finish the 0.2.0 release, in order:**
+1. **Gate 7a (RCON-reachable) for 0.2.0** — boot `farmers-market-0.2.0.jar` on a disposable
+   fresh-volume Legendary stack; confirm enable, **Migration 2 brings schema v1→v2 on real SQLite**,
+   the expiry scheduler registers with no error, `/market reload` works, and the new player-only
+   subcommands (sell/buy/cancel/mine/claim) console-refuse cleanly like M1's deposit/withdraw.
+   Record the note in §7a, matching M1's shape. This is what `minecraft-plugin-release` consumes.
+2. **Gate 12 play-test (client-dependent) — carried, as M1 did.** A real Java + Bedrock client:
+   list an enchanted item and a filled shulker → buy each → confirm byte-identical delivery; the
+   shulker `summary` legible on Bedrock with no invisible icon (Geyser #3001); the offline-seller
+   payout; the XP fee deducted; a tipped arrow / filled map / player head / firework each treated as
+   UNIQUE (Task 3 classification). Plus M1's still-open carries (Floodgate merge, the shutdown
+   reconciliation line).
+3. **Then** `minecraft-plugin-release` (tag `v0.2.0`), `minecraft-plugin-updater` (gate 10),
+   `minecraft-plugin-deploy` (gate 11). Also bump the checklist header to `0.2.0` and re-record
+   §4/§6 for the 255-test build during the release exit.
+
+**Alternative next area: M2 Part 2 (commodity exchange)** — if you'd rather defer the 0.2.0 release
+and keep building: anonymous buy/sell offer matching, partial fills, rolling buy limits, the server
+buy-back floor. Builds on this spine (`item_class` and the config keys are already in place). Ships
+as `0.3.0`. A separate plan, not yet written.
 
 `main` is at **`26b2720`** (merge of `feat/m2-entry-conditions`), CI green, branch deleted.
 `v0.1.0` remains the released tag — the entry conditions are unreleased refactor work sitting on
