@@ -51,6 +51,38 @@ The market. From §1: listings, item identity, commodity offer matching, escrow,
 Still M3-M5, do not build: any GUI or Cumulus form, vendors, `TextDisplay`, stalls, sealed bids,
 price history, indices, map charts.
 
+## STATUS: entry conditions are DONE but UNREVIEWED
+
+Branch `feat/m2-entry-conditions`, based on `95cf0a1`, **not merged and not pushed**. `main` is
+still at `95cf0a1` with `v0.1.0` released, so nothing here is at risk.
+
+Six commits: `89a2b77` (ConfigValidator), `b0e8dbf` (upsertAccount + findLink), `673d313`
+(`NOTHING_WRITTEN`), `13dcfdc` (plugin logger), `ef31f92` (re-entrancy notes), `c83b097` (the two
+follow-ups below). **204 tests**, 29 mutations run and all caught. Full detail:
+`.superpowers/sdd/m2-entry-report.md`.
+
+**The next step is a review of this branch**, then merge, then write the M2 plan. Do not merge it
+unreviewed — every task on M1 that skipped straight to merge would have shipped a defect.
+
+Two things were caught and fixed during the work, both worth knowing:
+
+1. **The M1 mint-bug shape recurred.** `deposit` was narrowed to a definite refusal on a provable
+   no-write failure while `withdraw` was left as unknown — "two code paths, same question,
+   different answers", which is exactly what let `deposit` and `deliver` diverge in M1 and mint
+   diamonds. Fixed by routing both through one `Ledger.readBeforeWriting`, with the policy written
+   down once and pointed at from every call site. `transfer` and `mergeAccounts` deliberately stay
+   unknown — reads inside a transaction are entangled with rollback and the autocommit restore, and
+   neither has a compensating caller — and that exception is now written down rather than inferred.
+2. **A fifth hollow test.** `mergeIsIdempotentAndDoesNotDoubleCredit` survived a `findLink` that
+   always answered "no link". It was genuinely out of scope until `findLink` existed; adding it put
+   the test on top of the mechanism it failed to pin. Replaced with a test killed by that exact
+   mutation.
+
+**One concern remains open:** `MarketCommand`'s deposit/withdraw/deliver compensation branches are
+still provable only by reading them — no unit test reaches them, because they need a live server.
+If M2 touches those branches, lifting the decision into `MarketResolver` as a pure function closes
+it permanently. Otherwise they stay a runtime-pass obligation.
+
 ## M2 entry conditions — do these FIRST
 
 Before M2 adds its first config key or schema change, while nothing has copied the current shape:

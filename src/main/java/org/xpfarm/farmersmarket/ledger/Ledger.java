@@ -38,6 +38,14 @@ import org.xpfarm.farmersmarket.storage.DatabaseExecutor;
  * things thrown synchronously are {@link NullPointerException}s for null arguments, which are
  * programming errors rather than outcomes.
  *
+ * <p><b>The cause's type is the contract, and it says whether anything was written.</b> A
+ * {@link LedgerException} means the operation was <em>refused</em> and nothing in the database
+ * changed, so the caller may safely compensate -- hand the items back, drop them, keep them.
+ * Any other cause means the outcome is <em>unknown</em>, not failed: a commit followed by a
+ * failing cleanup moves the money and still throws. Nothing may be compensated there, in either
+ * direction. This class widens the first set only where it can prove the write never started;
+ * see {@link LedgerException.Reason#NOTHING_WRITTEN}.
+ *
  * <p>Accounts are keyed on UUID and never on username: Floodgate's username prefix is
  * configurable and Java names change, so a name-keyed balance is a balance waiting to be lost.
  *
@@ -82,22 +90,72 @@ public final class Ledger {
     /**
      * Adds {@code amount} to {@code player}'s balance.
      *
+     * <p><b>A failure of the balance read is reported as a refusal, not as an unknown outcome.</b>
+     * The read happens before the write is even prepared, so a {@link SQLException} out of it has
+     * provably changed nothing; it arrives as
+     * {@link LedgerException.Reason#NOTHING_WRITTEN}. That distinction is what lets the command
+     * layer hand a depositing player their items straight back instead of holding them pending a
+     * human. Everything from the write onwards keeps its raw {@link SQLException}, because a
+     * statement that may have committed is an unknown outcome and must stay one.
+     *
      * @param player the account to credit
      * @param amount the amount to add; must not be negative
      * @return a future completing with the new balance, or failing with a
      *         {@link LedgerException} whose reason is
-     *         {@link LedgerException.Reason#NEGATIVE_AMOUNT} or
-     *         {@link LedgerException.Reason#AMOUNT_TOO_LARGE}
+     *         {@link LedgerException.Reason#NEGATIVE_AMOUNT},
+     *         {@link LedgerException.Reason#AMOUNT_TOO_LARGE}, or
+     *         {@link LedgerException.Reason#NOTHING_WRITTEN}
      */
     public CompletableFuture<Diamonds> deposit(UUID player, Diamonds amount) {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(amount, "amount");
         return executor.submit(() -> {
             requireNonNegative(amount);
-            Diamonds updated = Diamonds.ofDust(accounts.balanceDust(player)).plus(amount);
+            // One policy, stated once in readBeforeWriting and applied identically by withdraw:
+            // a failure of this read is a definite refusal, everything from the write onwards is
+            // an unknown outcome.
+            Diamonds updated = readBeforeWriting(player).plus(amount);
             accounts.upsertBalance(player, updated.dust());
             return updated;
         });
+    }
+
+    /**
+     * The balance read that a single-account operation performs before its write, with a storage
+     * failure converted into a {@link LedgerException.Reason#NOTHING_WRITTEN} refusal.
+     *
+     * <p><b>This is the one place the pre-write question is answered, and both {@link #deposit}
+     * and {@link #withdraw} route through it.</b> Two operations answering "was anything written?"
+     * in different ways, forty lines apart, is the shape that already cost this plugin once: the
+     * whole-branch review found {@code deposit} and {@code deliver} answering the same
+     * items-moved-outcome-unknown question in opposite directions, each locally defensible, and
+     * together able to mint diamonds. There is one answer here, and it is the same answer for
+     * every caller.
+     *
+     * <p><b>Only the read is inside the {@code try}, and that is the whole safety argument.</b>
+     * A failure here happened before any statement that could change a balance was even prepared,
+     * so "nothing was written" is a fact rather than an assumption. Widening this to cover the
+     * {@code upsertBalance} that follows would claim the same fact about a statement that may
+     * have committed and then failed on the way out -- and the command layer would compensate on
+     * top of a write that landed. Never wrap a write in this.
+     *
+     * <p><b>Not used by {@link #transfer} or {@link #mergeAccounts}, deliberately.</b> Their reads
+     * happen inside a transaction, where a failure is entangled with the rollback and the
+     * autocommit restore that follow it -- a rollback that itself fails is followed by a
+     * restore the driver implements as a {@code COMMIT}. Only the first read of those operations
+     * is provably pre-write, and neither has a caller that compensates on the answer, so they keep
+     * their raw {@link SQLException} and stay unknown. Unknown is always the safe direction: it
+     * compensates nothing and can therefore never dupe. If M2 gives them a compensating caller,
+     * the narrowing has to be worked out per statement, not copied.
+     */
+    private Diamonds readBeforeWriting(UUID player) {
+        try {
+            return Diamonds.ofDust(accounts.balanceDust(player));
+        } catch (SQLException readFailure) {
+            throw new LedgerException(LedgerException.Reason.NOTHING_WRITTEN,
+                    "could not read the balance of " + player + " before writing it; the write "
+                            + "was never attempted", readFailure);
+        }
     }
 
     /**
@@ -107,20 +165,32 @@ public final class Ledger {
      * caller is about to hand the player physical diamonds, and a partial withdrawal it did not
      * ask for would hand over the wrong number of them.
      *
+     * <p><b>The balance read is answered exactly as {@link #deposit}'s is.</b> A failure of it
+     * happened before the debit was attempted, so nothing left the player's balance and nothing
+     * left their inventory either; it arrives as
+     * {@link LedgerException.Reason#NOTHING_WRITTEN}, a definite refusal. Telling that player the
+     * outcome was uncertain and sending them to check a balance that provably did not move is
+     * both false and corrosive -- it is the same message the genuinely ambiguous case needs to be
+     * believed. Everything from the debit onwards keeps its raw {@link SQLException} and stays
+     * unknown.
+     *
      * @param player the account to debit
      * @param amount the amount to remove; must not be negative
      * @return a future completing with the new balance, or failing with a
      *         {@link LedgerException} whose reason is
      *         {@link LedgerException.Reason#NEGATIVE_AMOUNT},
-     *         {@link LedgerException.Reason#INSUFFICIENT_FUNDS}, or
-     *         {@link LedgerException.Reason#AMOUNT_TOO_LARGE}
+     *         {@link LedgerException.Reason#INSUFFICIENT_FUNDS},
+     *         {@link LedgerException.Reason#AMOUNT_TOO_LARGE}, or
+     *         {@link LedgerException.Reason#NOTHING_WRITTEN}
      */
     public CompletableFuture<Diamonds> withdraw(UUID player, Diamonds amount) {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(amount, "amount");
         return executor.submit(() -> {
             requireNonNegative(amount);
-            Diamonds held = Diamonds.ofDust(accounts.balanceDust(player));
+            // The same one policy deposit applies, through the same method: this read failing is
+            // a definite refusal, the debit below failing is an unknown outcome.
+            Diamonds held = readBeforeWriting(player);
             Diamonds remaining = held.minus(amount);
             if (remaining.isNegative()) {
                 throw insufficient(player, held, amount);
@@ -145,6 +215,13 @@ public final class Ledger {
      * should still reject paying yourself at the command layer, because a silent success is a
      * confusing answer to a command a player did not mean to type.
      *
+     * <p><b>M2: this method opens its own transaction. Do not call it from inside one.</b> A sale
+     * that wants to move money and write a listing, an escrow row, and a trade-log row atomically
+     * cannot wrap this call in {@link #inTransaction} -- there is one connection, and the guard
+     * there refuses the nesting outright. Put the whole sale inside one {@link #inTransaction}
+     * and use {@link AccountDao} plus the {@link Diamonds} arithmetic directly, or give this
+     * class a method that does the whole sale. See {@link #inTransaction} for why.
+     *
      * @param from   the account to debit
      * @param to     the account to credit
      * @param amount the amount to move; must not be negative
@@ -163,6 +240,12 @@ public final class Ledger {
             if (from.equals(to)) {
                 return null;
             }
+            // Opens a transaction. M2 is the milestone that makes nesting reachable -- a sale
+            // needs the money move, the escrow row, and the trade-log row in one transaction --
+            // so if you are here to compose this call into a larger operation, stop: one
+            // connection means the inner commit would commit the outer caller's half-applied
+            // work, and inTransaction refuses the nesting rather than allowing it. Compose
+            // inside a single inTransaction over the DAO instead.
             return inTransaction(() -> {
                 Diamonds held = Diamonds.ofDust(accounts.balanceDust(from));
                 Diamonds remaining = held.minus(amount);
@@ -210,6 +293,10 @@ public final class Ledger {
             if (floodgateUuid.equals(javaUuid)) {
                 return null;
             }
+            // Opens a transaction, exactly as transfer does, and with the same warning: this is
+            // not composable into a larger one. When M2 gives a linking player their listings,
+            // escrow, and open offers as well, the transaction has to be widened here rather
+            // than by wrapping this call -- see inTransaction's nesting guard.
             return inTransaction(() -> {
                 if (alreadyLinked(floodgateUuid)) {
                     return null;
@@ -223,12 +310,20 @@ public final class Ledger {
                 // through Diamonds first is what makes an overflowing pair refuse with
                 // AMOUNT_TOO_LARGE instead of wrapping into a negative balance -- which the
                 // accounts table's CHECK constraint would then reject with a far less useful
-                // error, after the delete had already been staged.
+                // error, after the delete had already been staged. This check runs BEFORE the
+                // merge is applied and its result is what gets written: the merged row's own
+                // balance is never trusted.
                 Diamonds total = Diamonds.ofDust(from.diamondsDust()).plus(Diamonds.ofDust(into.diamondsDust()));
-                AccountRow survivor = AccountMerge.merge(from, into);
+                AccountRow merged = AccountMerge.merge(from, into);
+                AccountRow survivor = new AccountRow(merged.uuid(), total.dust(),
+                        merged.createdAtEpochMs(), merged.updatedAtEpochMs());
 
                 accounts.deleteAccount(floodgateUuid);
-                accounts.upsertBalance(survivor.uuid(), total.dust());
+                // upsertAccount, not upsertBalance: the merged row's min(created_at) and
+                // max(updated_at) are the point of the merge, and upsertBalance would stamp its
+                // own clock over both -- silently replacing an older Bedrock account's creation
+                // time with the Java row's.
+                accounts.upsertAccount(survivor);
                 accounts.insertLink(floodgateUuid, javaUuid, nowEpochMs);
                 return null;
             });
@@ -260,8 +355,18 @@ public final class Ledger {
      * {@code commit()} would commit whatever the outer call had applied so far and then hand the
      * outer call a transaction it no longer owns -- reopening exactly the half-applied-transfer
      * window this class exists to close. JDBC offers no way to detect that other than autocommit
-     * already being off, so that is the check, made before anything is written. No such caller
-     * exists today; this method is package-private and M2 adds callers to this package.
+     * already being off, so that is the check, made before anything is written.
+     *
+     * <p><b>M2 is the milestone that makes nesting reachable, and the two existing call sites are
+     * where it will be reached from.</b> {@link #transfer} and {@link #mergeAccounts} each open
+     * their own transaction; an M2 sale that wants the money move, the escrow row, and the
+     * immutable trade-log row to commit or fail together cannot get that by wrapping either of
+     * them, and the guard above turns the attempt into an {@link IllegalStateException} rather
+     * than a silently half-applied trade. The way to compose is to write the whole operation as
+     * one {@code inTransaction} body over {@link AccountDao}, reusing the {@link Diamonds}
+     * arithmetic for the overflow checks, or to add a method here that owns the whole operation.
+     * Do not add a re-entrancy count or a savepoint to make nesting work: SQLite savepoints would
+     * let an outer failure keep an inner success, which for a trade log is worse than refusing.
      *
      * <p>Package-private rather than private purely so {@code LedgerTest} can drive a failure that
      * is not an {@code Exception} through it. There is no other way to reach that path -- the
@@ -306,18 +411,12 @@ public final class Ledger {
     /**
      * Whether {@code floodgateUuid} has already been merged into some Java account.
      *
-     * <p>Reads the whole link table and scans it, because {@link AccountDao} exposes no lookup
-     * by Floodgate UUID and Task 2's DAO is not this task's to change. The table holds one row
-     * per Bedrock player who has ever linked, so this is small today; a {@code findLink(UUID)}
-     * on the DAO is the right fix once it is not.
+     * <p>One primary-key lookup. This runs inside the merge transaction on every join of every
+     * Bedrock player, so the full-table scan it used to do -- reading {@code allLinks()} and
+     * walking it -- grew with the number of players who had ever linked, on the join path.
      */
     private boolean alreadyLinked(UUID floodgateUuid) throws SQLException {
-        for (UUID[] link : accounts.allLinks()) {
-            if (floodgateUuid.equals(link[0])) {
-                return true;
-            }
-        }
-        return false;
+        return accounts.findLink(floodgateUuid).isPresent();
     }
 
     /**

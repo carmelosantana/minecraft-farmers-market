@@ -14,15 +14,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.xpfarm.farmersmarket.storage.AccountDao;
+import org.xpfarm.farmersmarket.storage.AccountRow;
 import org.xpfarm.farmersmarket.storage.Database;
 import org.xpfarm.farmersmarket.storage.DatabaseExecutor;
 import org.xpfarm.farmersmarket.storage.Migrations;
 
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -114,16 +117,6 @@ class LedgerTest {
         assertEquals(15_000L, ledger.balance(JAVA_UUID).get().dust());
         assertEquals(0L, ledger.balance(FLOODGATE_UUID).get().dust());
         assertEquals(1, dao.allLinks().size());
-    }
-
-    @Test
-    void mergeIsIdempotentAndDoesNotDoubleCredit() throws Exception {
-        ledger.deposit(FLOODGATE_UUID, Diamonds.ofDiamonds(12)).get();
-
-        ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 1L).get();
-        ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 2L).get();
-
-        assertEquals(12_000L, ledger.balance(JAVA_UUID).get().dust());
     }
 
     // --- Beyond the brief -----------------------------------------------------------------
@@ -275,6 +268,102 @@ class LedgerTest {
         assertEquals(0L, ledger.balance(BOB).get().dust());
     }
 
+    /**
+     * A storage failure on the balance read {@code deposit} performs before its write is a
+     * <em>refusal</em>, not an unknown outcome.
+     *
+     * <p>The command layer takes the player's diamonds out of their inventory before it credits
+     * them, and returns them only when the failure is a {@link LedgerException}. Before this
+     * reason existed, a read that threw arrived as a bare {@code SQLException} and the player's
+     * items were held indefinitely against the possibility that the credit had committed -- which
+     * a failed read cannot have done.
+     */
+    @Test
+    void aReadFailureBeforeTheWriteIsReportedAsARefusalWithNothingWritten() throws Exception {
+        execRaw("DROP TABLE accounts");
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> ledger.deposit(PLAYER, Diamonds.ofDiamonds(5)).get());
+
+        LedgerException refused = assertInstanceOf(LedgerException.class, thrown.getCause(),
+                "a failed read must be a typed refusal, not a raw SQLException");
+        assertEquals(LedgerException.Reason.NOTHING_WRITTEN, refused.reason());
+        assertInstanceOf(SQLException.class, refused.getCause(),
+                "the underlying storage failure must still be attached for the log");
+    }
+
+    /**
+     * The narrowing stops at the write, and this is the test that proves it did not leak.
+     *
+     * <p>A statement that reached the database may have committed and then failed on the way out.
+     * Reporting that as {@code NOTHING_WRITTEN} would have the command layer hand a depositing
+     * player their items back on top of a credit that landed, which mints diamonds. So a failure
+     * from here on stays a raw {@code SQLException} and the player keeps nothing back.
+     */
+    @Test
+    void aWriteFailureAfterASuccessfulReadStaysUnknownRatherThanClaimingNothingWasWritten()
+            throws Exception {
+        ledger.deposit(PLAYER, Diamonds.ofDiamonds(1)).get();
+        // Fires on the ON CONFLICT DO UPDATE branch of the upsert, i.e. after the read has
+        // already succeeded. There is no other way to fail a write on demand: AccountDao,
+        // Database, and DatabaseExecutor are all final.
+        execRaw("CREATE TRIGGER refuse_writes BEFORE UPDATE ON accounts "
+                + "BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END");
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> ledger.deposit(PLAYER, Diamonds.ofDiamonds(5)).get());
+
+        assertInstanceOf(SQLException.class, thrown.getCause(),
+                "a failure at or after the write must stay an unknown outcome");
+        assertFalse(thrown.getCause() instanceof LedgerException,
+                "a write that may have committed must never be reported as a refusal");
+    }
+
+    /**
+     * {@code withdraw} answers the pre-write question exactly as {@code deposit} does.
+     *
+     * <p>It debits before it hands anything over, so a failure of the read that precedes the debit
+     * means the balance did not move and no diamonds left the ledger. That is a definite refusal.
+     * Reporting it as an unknown outcome would tell the player to go and check a balance that
+     * provably did not change -- and every such false alarm makes the same message less believable
+     * in the genuinely ambiguous case, which is the case where it has to be believed.
+     */
+    @Test
+    void aReadFailureBeforeTheDebitIsReportedAsARefusalWithNothingWritten() throws Exception {
+        execRaw("DROP TABLE accounts");
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> ledger.withdraw(PLAYER, Diamonds.ofDiamonds(5)).get());
+
+        LedgerException refused = assertInstanceOf(LedgerException.class, thrown.getCause(),
+                "withdraw must answer a failed pre-write read exactly as deposit does");
+        assertEquals(LedgerException.Reason.NOTHING_WRITTEN, refused.reason());
+        assertInstanceOf(SQLException.class, refused.getCause(),
+                "the underlying storage failure must still be attached for the log");
+    }
+
+    /**
+     * And the narrowing stops at the debit, exactly as it stops at the credit on the deposit side.
+     *
+     * <p>A debit that reached the database may have committed and then failed on the way out. The
+     * command layer must not hand over diamonds on that outcome, so it must not see a refusal.
+     */
+    @Test
+    void aDebitFailureAfterASuccessfulReadStaysUnknownRatherThanClaimingNothingWasWritten()
+            throws Exception {
+        ledger.deposit(PLAYER, Diamonds.ofDiamonds(10)).get();
+        execRaw("CREATE TRIGGER refuse_writes BEFORE UPDATE ON accounts "
+                + "BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END");
+
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> ledger.withdraw(PLAYER, Diamonds.ofDiamonds(5)).get());
+
+        assertInstanceOf(SQLException.class, thrown.getCause(),
+                "a failure at or after the debit must stay an unknown outcome");
+        assertFalse(thrown.getCause() instanceof LedgerException,
+                "a debit that may have committed must never be reported as a refusal");
+    }
+
     @Test
     void mergeThatWouldOverflowIsRefusedAndLeavesBothAccountsAlone() throws Exception {
         seedRaw(FLOODGATE_UUID, Long.MAX_VALUE);
@@ -314,20 +403,80 @@ class LedgerTest {
     }
 
     /**
-     * The second merge is a no-op because a link row already exists, not because the balances
-     * happened to work out -- so a balance earned on the Bedrock UUID after the first merge stays
-     * where it is rather than being swept a second time.
+     * The merge is idempotent <em>because of the link row</em>, and this is the test that proves
+     * it: a second merge neither sweeps the Floodgate account again nor double-credits the Java
+     * one.
+     *
+     * <p>It replaces an M1 test named {@code mergeIsIdempotentAndDoesNotDoubleCredit} that merged
+     * twice in a row and asserted the Java balance had not doubled. That test could not fail:
+     * the first merge deletes the Floodgate row, so the second one sums zero into the survivor
+     * and lands on the same number whether the link check runs or not. Deleting {@code findLink}'s
+     * answer entirely left it green. <b>The balance earned on the old UUID between the two merges
+     * is the whole mechanism</b> -- without it there is nothing a second sweep could move, and
+     * therefore nothing the assertion can see.
+     *
+     * <p>The first merge here moves a real balance, so this also pins that the no-op is a no-op
+     * and not simply a merge that never worked.
      */
     @Test
-    void mergeAfterTheLinkExistsLeavesTheFloodgateAccountUntouched() throws Exception {
+    void mergeIsIdempotentByItsLinkRowSoASecondMergeNeitherSweepsNorDoubleCredits() throws Exception {
+        ledger.deposit(FLOODGATE_UUID, Diamonds.ofDiamonds(12)).get();
         ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 1L).get();
+        assertEquals(12_000L, ledger.balance(JAVA_UUID).get().dust(), "the first merge must sweep");
+
+        // Earned on the Bedrock UUID after linking. This is what a second sweep would move, and
+        // what a second credit would double.
         ledger.deposit(FLOODGATE_UUID, Diamonds.ofDiamonds(4)).get();
 
         ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 2L).get();
 
-        assertEquals(4_000L, ledger.balance(FLOODGATE_UUID).get().dust());
-        assertEquals(0L, ledger.balance(JAVA_UUID).get().dust());
+        assertEquals(12_000L, ledger.balance(JAVA_UUID).get().dust(),
+                "a second merge must not credit the Java account again");
+        assertEquals(4_000L, ledger.balance(FLOODGATE_UUID).get().dust(),
+                "a second merge must not sweep the Floodgate account again");
         assertEquals(1, dao.allLinks().size());
+    }
+
+    /**
+     * The merged row's timestamps must reach the database.
+     *
+     * <p>{@code AccountMerge.merge} computes {@code min(created_at)} and {@code max(updated_at)}
+     * across the two accounts. Writing the result through {@code upsertBalance} discarded both --
+     * that method stamps its own clock -- so a Bedrock player who had played for a year and then
+     * linked a fresh Java account came out of the merge looking newly created. Nothing in
+     * production observed the merge rule at all, which is why it is checked here and not only in
+     * {@code AccountMergeTest}.
+     */
+    @Test
+    void mergeWritesTheMergedRowsOwnTimestampsSoTheOlderCreationTimeSurvives() throws Exception {
+        seedRow(new AccountRow(FLOODGATE_UUID, 2_000L, 1_000L, 5_000L));
+        seedRow(new AccountRow(JAVA_UUID, 1_000L, 3_000L, 4_000L));
+
+        ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 1_700_000_000_000L).get();
+
+        AccountRow survivor = readRow(JAVA_UUID);
+        assertEquals(3_000L, survivor.diamondsDust());
+        assertEquals(1_000L, survivor.createdAtEpochMs(),
+                "the earlier of the two creation times must survive the merge");
+        assertEquals(5_000L, survivor.updatedAtEpochMs(),
+                "the later of the two update times must survive the merge");
+    }
+
+    /**
+     * A merge into an account with no row at all still records a creation time from the
+     * Floodgate side, rather than the merge's own clock, for the same reason.
+     */
+    @Test
+    void mergeIntoAnAbsentJavaAccountKeepsTheFloodgateAccountsCreationTime() throws Exception {
+        seedRow(new AccountRow(FLOODGATE_UUID, 500L, 1_000L, 2_000L));
+
+        ledger.mergeAccounts(FLOODGATE_UUID, JAVA_UUID, 8_000L).get();
+
+        AccountRow survivor = readRow(JAVA_UUID);
+        assertEquals(500L, survivor.diamondsDust());
+        assertEquals(1_000L, survivor.createdAtEpochMs());
+        assertEquals(8_000L, survivor.updatedAtEpochMs(),
+                "the absent side is stamped with the merge time, so that is the later of the two");
     }
 
     @Test
@@ -346,6 +495,29 @@ class LedgerTest {
             dao.upsertBalance(uuid, dust);
             return null;
         }).get();
+    }
+
+    /** Writes a whole row, timestamps included, on the executor's thread. */
+    private void seedRow(AccountRow row) throws Exception {
+        executor.submit(() -> {
+            dao.upsertAccount(row);
+            return null;
+        }).get();
+    }
+
+    /** Runs one raw statement on the executor's thread, to break the schema on purpose. */
+    private void execRaw(String sql) throws Exception {
+        executor.submit(() -> {
+            try (var statement = database.connection().createStatement()) {
+                statement.execute(sql);
+            }
+            return null;
+        }).get();
+    }
+
+    /** Reads a whole row on the executor's thread; the connection belongs to that thread. */
+    private AccountRow readRow(UUID uuid) throws Exception {
+        return executor.submit(() -> dao.findAccount(uuid).orElseThrow()).get();
     }
 
     private LedgerException.Reason reasonOfFailure(org.junit.jupiter.api.function.Executable call) {

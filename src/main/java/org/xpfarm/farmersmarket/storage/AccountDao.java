@@ -101,6 +101,46 @@ public final class AccountDao {
     }
 
     /**
+     * Writes {@code row} whole -- balance <em>and</em> both timestamps -- inserting it or
+     * overwriting the row already keyed on {@link AccountRow#uuid()}.
+     *
+     * <p><b>The difference from {@link #upsertBalance} is the timestamps, and it is the whole
+     * point of this method.</b> {@code upsertBalance} stamps {@code updated_at} with the clock
+     * and never touches an existing {@code created_at}, which is right for an ordinary deposit.
+     * It is wrong for an account merge: {@code identity.AccountMerge} computes
+     * {@code min(created_at)} and {@code max(updated_at)} across the two rows being folded
+     * together, and putting that result through {@code upsertBalance} silently discards both --
+     * an older Bedrock account's creation time would be replaced by the Java row's. So this
+     * method takes the caller's timestamps verbatim and overwrites {@code created_at} on the
+     * conflict branch too. A caller that wants "now" must say so.
+     *
+     * <p>{@code diamonds_dust} must be non-negative; the table's own
+     * {@code CHECK (diamonds_dust >= 0)} constraint rejects a negative balance with a
+     * {@link SQLException}.
+     *
+     * @param row the complete row to persist
+     * @throws SQLException if the write fails, including a {@code CHECK} constraint violation
+     */
+    public void upsertAccount(AccountRow row) throws SQLException {
+        Objects.requireNonNull(row, "row");
+        String sql = """
+                INSERT INTO accounts (uuid, diamonds_dust, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(uuid) DO UPDATE SET diamonds_dust = ?, created_at = ?, updated_at = ?
+                """;
+        try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
+            ps.setString(1, row.uuid().toString());
+            ps.setLong(2, row.diamondsDust());
+            ps.setLong(3, row.createdAtEpochMs());
+            ps.setLong(4, row.updatedAtEpochMs());
+            ps.setLong(5, row.diamondsDust());
+            ps.setLong(6, row.createdAtEpochMs());
+            ps.setLong(7, row.updatedAtEpochMs());
+            ps.executeUpdate();
+        }
+    }
+
+    /**
      * The full row for {@code uuid}, if one exists.
      *
      * @param uuid the account to read
@@ -166,6 +206,30 @@ public final class AccountDao {
         try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
             ps.setString(1, uuid.toString());
             ps.executeUpdate();
+        }
+    }
+
+    /**
+     * The Java account {@code floodgateUuid} was merged into, if it has been merged at all.
+     *
+     * <p>A primary-key lookup, and that is the point: this runs on every player join to decide
+     * whether the merge has already happened, and the alternative -- reading {@link #allLinks}
+     * and scanning it -- is a full table scan of a table that grows by one row per Bedrock player
+     * who has ever linked. {@link #allLinks} stays for the operator-facing "show me everything"
+     * case; it is the wrong tool for a membership test.
+     *
+     * @param floodgateUuid the synthetic, XUID-derived UUID Floodgate assigned before linking
+     * @return the Java UUID this account was merged into, or {@link Optional#empty()} if no link
+     *         has been recorded for {@code floodgateUuid}
+     */
+    public Optional<UUID> findLink(UUID floodgateUuid) throws SQLException {
+        Objects.requireNonNull(floodgateUuid, "floodgateUuid");
+        String sql = "SELECT java_uuid FROM account_links WHERE floodgate_uuid = ?";
+        try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
+            ps.setString(1, floodgateUuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(UUID.fromString(rs.getString("java_uuid"))) : Optional.empty();
+            }
         }
     }
 

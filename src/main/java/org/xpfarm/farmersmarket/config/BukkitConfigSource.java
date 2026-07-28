@@ -137,8 +137,10 @@ public final class BukkitConfigSource implements ConfigSource {
         if (raw == null || expected.isInstance(raw)) {
             return false;
         }
-        warn.accept("FarmersMarket config: key '" + path + "' has unreadable value '" + raw
-                + "'; using default '" + fallback + "' instead.");
+        // Detecting the mismatch is this class's job -- only the adapter can see the raw value --
+        // but the wording lives in ConfigValidator so every rejection an operator reads is phrased
+        // the same way.
+        ConfigValidator.reportUnreadable(path, raw, fallback, warn);
         return true;
     }
 }

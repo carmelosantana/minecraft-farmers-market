@@ -11,9 +11,7 @@ package org.xpfarm.farmersmarket.config;
 
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -31,7 +29,10 @@ import java.util.function.Consumer;
  *
  * <p>This class deliberately imports nothing from {@code org.bukkit}. Reading is delegated
  * to a {@link ConfigSource}, so the whole parsing contract is unit testable without a
- * server; see {@link BukkitConfigSource} for the production wiring.
+ * server; see {@link BukkitConfigSource} for the production wiring. Judging a value once it
+ * has been read -- the ranges, the enums, the warning wording -- is delegated to
+ * {@link ConfigValidator}, so this class holds only the key names, the bounds, and the
+ * defaults.
  *
  * <p>Instances are only ever produced by {@link #load}; the constructor is private so no
  * caller can construct an unvalidated instance.
@@ -168,70 +169,72 @@ public final class FmConfig {
      * @return a fully validated, immutable configuration snapshot
      */
     public static FmConfig load(ConfigSource source, Consumer<String> warn) {
-        double listingFeePercent = requireDoubleInRange("economy.listing-fee-percent",
+        double listingFeePercent = ConfigValidator.requireInRange("economy.listing-fee-percent",
                 source.getDouble("economy.listing-fee-percent", 1.0), 0.0, 100.0, 1.0, warn);
-        double salesTaxPercent = requireDoubleInRange("economy.sales-tax-percent",
+        double salesTaxPercent = ConfigValidator.requireInRange("economy.sales-tax-percent",
                 source.getDouble("economy.sales-tax-percent", 7.0), 0.0, 100.0, 7.0, warn);
-        double taxBurnShare = requireDoubleInRange("economy.tax-burn-share",
+        double taxBurnShare = ConfigValidator.requireInRange("economy.tax-burn-share",
                 source.getDouble("economy.tax-burn-share", 0.5), 0.0, 1.0, 0.5, warn);
-        int xpPerDiamond = requireIntAbove("economy.xp-per-diamond",
+        int xpPerDiamond = ConfigValidator.requireAbove("economy.xp-per-diamond",
                 source.getInt("economy.xp-per-diamond", 40), 0, 40, warn);
-        int listingDurationDays = requireIntInRange("economy.listing-duration-days",
+        int listingDurationDays = ConfigValidator.requireInRange("economy.listing-duration-days",
                 source.getInt("economy.listing-duration-days", 14), 1, 90, 14, warn);
-        int maxListingsPerPlayer = requireIntAbove("economy.max-listings-per-player",
+        int maxListingsPerPlayer = ConfigValidator.requireAbove("economy.max-listings-per-player",
                 source.getInt("economy.max-listings-per-player", 40), 0, 40, warn);
 
         boolean buybackEnabled = source.getBoolean("liquidity.buyback-enabled", true);
         Map<String, Double> rawBuybackFloors = source.getDoubleMap("liquidity.buyback-floors");
-        Map<String, Double> farmOutputCosts = requirePositiveDoubleMap("liquidity.farm-output-costs",
-                source.getDoubleMap("liquidity.farm-output-costs"), warn);
+        Map<String, Double> farmOutputCosts = ConfigValidator.requirePositiveValues(
+                "liquidity.farm-output-costs", source.getDoubleMap("liquidity.farm-output-costs"), warn);
         boolean farmOutputAudit = source.getBoolean("liquidity.farm-output-audit", true);
         Map<String, Double> buybackFloors =
                 resolveBuybackFloors(rawBuybackFloors, farmOutputCosts, farmOutputAudit, warn);
 
         boolean buyLimitEnabled = source.getBoolean("limits.buy-limit-enabled", true);
-        int buyLimitWindowHours = requireIntInRange("limits.buy-limit-window-hours",
+        int buyLimitWindowHours = ConfigValidator.requireInRange("limits.buy-limit-window-hours",
                 source.getInt("limits.buy-limit-window-hours", 4), 1, 168, 4, warn);
-        Map<String, Integer> buyLimits = requirePositiveIntMap("limits.buy-limits",
-                source.getIntMap("limits.buy-limits"), warn);
-        int minPlaytimeHours = requireIntAtLeast("limits.min-playtime-hours",
+        Map<String, Integer> buyLimits = ConfigValidator.requirePositiveValues(
+                "limits.buy-limits", source.getIntMap("limits.buy-limits"), warn);
+        int minPlaytimeHours = ConfigValidator.requireAtLeast("limits.min-playtime-hours",
                 source.getInt("limits.min-playtime-hours", 2), 0, 2, warn);
 
-        int maxVendorsPerPlayer = requireIntAbove("vendor.max-per-player",
+        int maxVendorsPerPlayer = ConfigValidator.requireAbove("vendor.max-per-player",
                 source.getInt("vendor.max-per-player", 2), 0, 2, warn);
         String rawPlacementMode = source.getString("vendor.placement-mode", "owned-and-district");
-        VendorPlacementMode vendorPlacementMode = requireEnum("vendor.placement-mode", rawPlacementMode,
-                VendorPlacementMode.parse(rawPlacementMode), VendorPlacementMode.OWNED_AND_DISTRICT, warn);
-        int vendorMinDistanceBlocks = requireIntAtLeast("vendor.min-distance-blocks",
+        VendorPlacementMode vendorPlacementMode = ConfigValidator.requireEnum("vendor.placement-mode",
+                rawPlacementMode, VendorPlacementMode.parse(rawPlacementMode),
+                VendorPlacementMode.OWNED_AND_DISTRICT, warn);
+        int vendorMinDistanceBlocks = ConfigValidator.requireAtLeast("vendor.min-distance-blocks",
                 source.getInt("vendor.min-distance-blocks", 24), 0, 24, warn);
         boolean vendorLabelEnabled = source.getBoolean("vendor.label-enabled", true);
 
         boolean stallsEnabled = source.getBoolean("stalls.enabled", true);
-        String stallBidCurrency = requireOneOf("stalls.bid-currency",
+        String stallBidCurrency = ConfigValidator.requireOneOf("stalls.bid-currency",
                 source.getString("stalls.bid-currency", DEFAULT_STALL_BID_CURRENCY), STALL_BID_CURRENCIES,
                 DEFAULT_STALL_BID_CURRENCY, warn);
-        int stallBidPeriodHours = requireIntAbove("stalls.bid-period-hours",
+        int stallBidPeriodHours = ConfigValidator.requireAbove("stalls.bid-period-hours",
                 source.getInt("stalls.bid-period-hours", 168), 0, 168, warn);
-        int maxStallsPerPlayer = requireIntAbove("stalls.max-stalls-per-player",
+        int maxStallsPerPlayer = ConfigValidator.requireAbove("stalls.max-stalls-per-player",
                 source.getInt("stalls.max-stalls-per-player", 1), 0, 1, warn);
 
         String rawBarGlyphs = source.getString("ui.bar-glyphs", "density-4");
-        BarGlyphs barGlyphs = requireEnum("ui.bar-glyphs", rawBarGlyphs, BarGlyphs.parse(rawBarGlyphs),
-                BarGlyphs.DENSITY_4, warn);
+        BarGlyphs barGlyphs = ConfigValidator.requireEnum("ui.bar-glyphs", rawBarGlyphs,
+                BarGlyphs.parse(rawBarGlyphs), BarGlyphs.DENSITY_4, warn);
         boolean chartsEnabled = source.getBoolean("ui.charts-enabled", true);
-        int chartRefreshSeconds = requireIntAtLeast("ui.chart-refresh-seconds",
+        int chartRefreshSeconds = ConfigValidator.requireAtLeast("ui.chart-refresh-seconds",
                 source.getInt("ui.chart-refresh-seconds", 60), 10, 60, warn);
         boolean bedrockTouchSimplify = source.getBoolean("ui.bedrock-touch-simplify", true);
 
         List<String> indexBasket = source.getStringList("analytics.index-basket");
-        double outlierFilterMad = requireDoubleAbove("analytics.outlier-filter-mad",
+        double outlierFilterMad = ConfigValidator.requireAbove("analytics.outlier-filter-mad",
                 source.getDouble("analytics.outlier-filter-mad", 3.0), 0.0, 3.0, warn);
-        int historyRetentionDays = requireIntAbove("analytics.history-retention-days",
+        int historyRetentionDays = ConfigValidator.requireAbove("analytics.history-retention-days",
                 source.getInt("analytics.history-retention-days", 365), 0, 365, warn);
 
-        String sqliteTmpdir = requireNonBlank("storage.sqlite-tmpdir",
-                source.getString("storage.sqlite-tmpdir", DEFAULT_SQLITE_TMPDIR), DEFAULT_SQLITE_TMPDIR, warn);
-        int busyTimeoutMs = requireIntAbove("storage.busy-timeout-ms",
+        String sqliteTmpdir = ConfigValidator.requireNonBlank("storage.sqlite-tmpdir",
+                source.getString("storage.sqlite-tmpdir", DEFAULT_SQLITE_TMPDIR),
+                DEFAULT_SQLITE_TMPDIR, warn);
+        int busyTimeoutMs = ConfigValidator.requireAbove("storage.busy-timeout-ms",
                 source.getInt("storage.busy-timeout-ms", 5000), 0, 5000, warn);
 
         return new FmConfig(
@@ -378,7 +381,11 @@ public final class FmConfig {
         return busyTimeoutMs;
     }
 
-    // ---- validation helpers -----------------------------------------------------------
+    // ---- the buy-back faucet audit ------------------------------------------------------
+    //
+    // Range and type checking lives in ConfigValidator. What stays here is the one rule that is
+    // about this plugin's economy rather than about reading a value: it needs two keys at once
+    // and a policy argument, so it is not a validator, it is the faucet safety switch.
 
     /**
      * Applies the buy-back faucet audit described on {@link #load}. Returns only the
@@ -419,131 +426,5 @@ public final class FmConfig {
             }
         }
         return surviving;
-    }
-
-    /** Drops non-positive entries from an item-cost map, warning about each one dropped. */
-    private static Map<String, Double> requirePositiveDoubleMap(String key, Map<String, Double> raw,
-            Consumer<String> warn) {
-        Map<String, Double> result = new LinkedHashMap<>();
-        for (Map.Entry<String, Double> entry : raw.entrySet()) {
-            if (entry.getValue() != null && entry.getValue() > 0) {
-                result.put(entry.getKey(), entry.getValue());
-            } else {
-                warn.accept("FarmersMarket config: " + key + " entry '" + entry.getKey()
-                        + "' has non-positive value '" + entry.getValue() + "'; entry ignored.");
-            }
-        }
-        return result;
-    }
-
-    /** Drops non-positive entries from an item-quantity map, warning about each one dropped. */
-    private static Map<String, Integer> requirePositiveIntMap(String key, Map<String, Integer> raw,
-            Consumer<String> warn) {
-        Map<String, Integer> result = new LinkedHashMap<>();
-        for (Map.Entry<String, Integer> entry : raw.entrySet()) {
-            if (entry.getValue() != null && entry.getValue() > 0) {
-                result.put(entry.getKey(), entry.getValue());
-            } else {
-                warn.accept("FarmersMarket config: " + key + " entry '" + entry.getKey()
-                        + "' has non-positive value '" + entry.getValue() + "'; entry ignored.");
-            }
-        }
-        return result;
-    }
-
-    /** Rejects an {@code int} outside {@code [min, max]}, substituting {@code fallback}. */
-    private static int requireIntInRange(String key, int value, int min, int max, int fallback,
-            Consumer<String> warn) {
-        if (value < min || value > max) {
-            warn.accept(outOfRangeMessage(key, value, min, max, fallback));
-            return fallback;
-        }
-        return value;
-    }
-
-    /** Rejects an {@code int} below {@code min}, substituting {@code fallback}. */
-    private static int requireIntAtLeast(String key, int value, int min, int fallback, Consumer<String> warn) {
-        if (value < min) {
-            warn.accept(belowMinimumMessage(key, value, min, fallback));
-            return fallback;
-        }
-        return value;
-    }
-
-    /** Rejects an {@code int} that is not strictly greater than {@code min}, e.g. {@code > 0}. */
-    private static int requireIntAbove(String key, int value, int min, int fallback, Consumer<String> warn) {
-        if (value <= min) {
-            warn.accept(mustExceedMessage(key, value, min, fallback));
-            return fallback;
-        }
-        return value;
-    }
-
-    /** Rejects a {@code double} outside {@code [min, max]}, substituting {@code fallback}. */
-    private static double requireDoubleInRange(String key, double value, double min, double max, double fallback,
-            Consumer<String> warn) {
-        if (Double.isNaN(value) || value < min || value > max) {
-            warn.accept(outOfRangeMessage(key, value, min, max, fallback));
-            return fallback;
-        }
-        return value;
-    }
-
-    /** Rejects a {@code double} that is not strictly greater than {@code min}, e.g. {@code > 0}. */
-    private static double requireDoubleAbove(String key, double value, double min, double fallback,
-            Consumer<String> warn) {
-        if (Double.isNaN(value) || value <= min) {
-            warn.accept(mustExceedMessage(key, value, min, fallback));
-            return fallback;
-        }
-        return value;
-    }
-
-    /** Rejects a value not present in {@code allowed} (case-insensitively), substituting {@code fallback}. */
-    private static String requireOneOf(String key, String value, Set<String> allowed, String fallback,
-            Consumer<String> warn) {
-        String candidate = value == null ? null : value.trim().toLowerCase(Locale.ROOT);
-        if (candidate == null || !allowed.contains(candidate)) {
-            warn.accept("FarmersMarket config: key '" + key + "' has invalid value '" + value
-                    + "'; using default '" + fallback + "' instead.");
-            return fallback;
-        }
-        return candidate;
-    }
-
-    /** Rejects a blank or {@code null} value, substituting {@code fallback}. */
-    private static String requireNonBlank(String key, String value, String fallback, Consumer<String> warn) {
-        if (value == null || value.isBlank()) {
-            warn.accept("FarmersMarket config: key '" + key + "' has blank value; using default '"
-                    + fallback + "' instead.");
-            return fallback;
-        }
-        return value;
-    }
-
-    /** Substitutes {@code fallback} when {@code parsed} did not resolve to an enum constant. */
-    private static <E extends Enum<E>> E requireEnum(String key, String rawValue, Optional<E> parsed, E fallback,
-            Consumer<String> warn) {
-        if (parsed.isPresent()) {
-            return parsed.get();
-        }
-        warn.accept("FarmersMarket config: key '" + key + "' has unknown value '" + rawValue
-                + "'; using default '" + fallback + "' instead.");
-        return fallback;
-    }
-
-    private static String outOfRangeMessage(String key, Object value, Object min, Object max, Object fallback) {
-        return "FarmersMarket config: key '" + key + "' has out-of-range value '" + value
-                + "' (must be between " + min + " and " + max + "); using default '" + fallback + "' instead.";
-    }
-
-    private static String belowMinimumMessage(String key, Object value, Object min, Object fallback) {
-        return "FarmersMarket config: key '" + key + "' has out-of-range value '" + value
-                + "' (must be at least " + min + "); using default '" + fallback + "' instead.";
-    }
-
-    private static String mustExceedMessage(String key, Object value, Object min, Object fallback) {
-        return "FarmersMarket config: key '" + key + "' has out-of-range value '" + value
-                + "' (must be greater than " + min + "); using default '" + fallback + "' instead.";
     }
 }

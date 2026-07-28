@@ -75,6 +75,14 @@ import org.xpfarm.farmersmarket.ledger.LedgerException;
  * either dupe the items or charge the player twice, so the command says plainly that it could
  * not confirm the result, logs the whole stack trace, and never retries.
  *
+ * <p>That unknown set is as narrow as the ledger can prove and no narrower, and it is the same
+ * width for every operation. A storage failure that happened before the ledger attempted any
+ * write arrives as {@link LedgerException.Reason#NOTHING_WRITTEN} and is compensated like any
+ * other refusal -- the depositing player gets their items back, and the withdrawing player is
+ * told plainly that nothing changed rather than being sent to check a balance that provably did
+ * not move. A storage failure that might have committed is still unknown in both, and the items
+ * are still held.
+ *
  * <h2>Bedrock safety</h2>
  *
  * <p>All output is plain chat text with legacy-named colours. No hover events, no click events
@@ -84,25 +92,29 @@ import org.xpfarm.farmersmarket.ledger.LedgerException;
  */
 public final class MarketCommand implements CommandExecutor, TabCompleter {
 
-    /**
-     * Deliberately {@code java.util.logging} rather than {@code Bukkit.getLogger()}: the paths
-     * that log here are the ones where something has already gone wrong with the ledger, and
-     * reaching through {@code Bukkit} for a logger makes them depend on a live server.
-     */
-    private static final Logger LOG = Logger.getLogger(MarketCommand.class.getName());
-
     private final Plugin plugin;
+    private final Logger log;
     private final Ledger ledger;
     private final Supplier<List<String>> reloadAction;
 
     /**
-     * @param plugin       the owning plugin, used only to schedule work back onto the main thread
+     * @param plugin       the owning plugin: schedules work back onto the main thread, resolves
+     *                     players by UUID, and supplies the logger every line here is written to
      * @param ledger       the one thing in the plugin that moves money
      * @param reloadAction re-reads {@code config.yml} and returns the validation warnings it
      *                     produced, empty when the file was clean
      */
     public MarketCommand(Plugin plugin, Ledger ledger, Supplier<List<String>> reloadAction) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
+        // The plugin's own logger, not Logger.getLogger(MarketCommand.class.getName()): Paper
+        // prefixes a plugin logger's output with [FarmersMarket], and every line this class
+        // writes is written because money may be involved. An operator grepping the console
+        // during an incident needs those lines attributed to this plugin, on the same line, with
+        // no ambiguity about which of a dozen plugins produced them. The "FarmersMarket: "
+        // message prefix stays as well, deliberately: it is what the incident notes tell the
+        // operator to grep for, and a message that carries it survives being quoted out of the
+        // console into a ticket.
+        this.log = plugin.getLogger();
         this.ledger = Objects.requireNonNull(ledger, "ledger");
         this.reloadAction = Objects.requireNonNull(reloadAction, "reloadAction");
     }
@@ -153,7 +165,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                 } else {
                     online.sendMessage(text("Could not read your balance just now. "
                             + "Try again in a moment.", NamedTextColor.RED));
-                    LOG.log(Level.WARNING, "FarmersMarket: could not read the balance of " + id
+                    log.log(Level.WARNING, "FarmersMarket: could not read the balance of " + id
                             + ". Nothing was changed by this.", failure);
                 }
                 return;
@@ -174,14 +186,14 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
      * that a plugin or a rounding artefact can push marginally outside it, and
      * {@link ExperienceMath#totalPoints} refuses out-of-range input rather than guessing.
      */
-    private static int experiencePoints(Player player) {
+    private int experiencePoints(Player player) {
         float progress = Math.max(0f, Math.min(1f, player.getExp()));
         try {
             return ExperienceMath.totalPoints(Math.max(0, player.getLevel()), progress);
         } catch (ArithmeticException | IllegalArgumentException e) {
             // Nothing a reachable level can cause. Showing a balance without an XP line beats
             // failing the whole command over the cosmetic half of it.
-            LOG.log(Level.WARNING, "FarmersMarket: could not compute experience points for "
+            log.log(Level.WARNING, "FarmersMarket: could not compute experience points for "
                     + player.getUniqueId(), e);
             return 0;
         }
@@ -244,7 +256,12 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                     }
                     if (failure instanceof LedgerException refused) {
                         // A refusal is definite: nothing was written, so the items are safe to
-                        // return.
+                        // return. That now includes Reason.NOTHING_WRITTEN -- a storage failure
+                        // the ledger can prove happened before it attempted any write, which
+                        // used to arrive as a bare SQLException and cost the player their
+                        // diamonds on the branch below. Widening this branch is only sound
+                        // because the ledger sets that reason from the pre-write read and
+                        // nowhere else.
                         giveOrDrop(id, where, moved);
                         message(id, text(MarketResolver.messageFor(refused.reason(), null)
                                 + " Your " + moved + " diamonds were returned.", NamedTextColor.RED));
@@ -304,7 +321,10 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                     if (failure instanceof LedgerException refused) {
                         // A refusal means the debit never happened, so there is nothing to undo.
                         // The balance is only re-read to fill in the number the player wants to
-                        // hear.
+                        // hear. That now includes Reason.NOTHING_WRITTEN on exactly the same
+                        // terms as the deposit branch above: a failed pre-write read is a
+                        // definite refusal in both operations, because it is answered in one
+                        // place -- Ledger.readBeforeWriting -- for both of them.
                         explainRefusedWithdrawal(id, refused);
                         return;
                     }
@@ -374,7 +394,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                         dropAt(again != null ? again.getLocation() : where, returned);
                         message(id, text("Your inventory filled up, so " + returned
                                 + " diamonds were dropped at your feet.", NamedTextColor.YELLOW));
-                        LOG.log(Level.WARNING, "FarmersMarket: " + id + "'s balance refused the "
+                        log.log(Level.WARNING, "FarmersMarket: " + id + "'s balance refused the "
                                 + "return of " + returned + " undelivered diamonds, so they were "
                                 + "dropped as items instead. The player still has them.", failure);
                         return;
@@ -397,7 +417,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
             // rather than taking anything down with it.
             error(sender, "Reload failed; the previous configuration is still active. "
                     + "See the server log.");
-            LOG.log(Level.WARNING, "FarmersMarket: reload failed.", t);
+            log.log(Level.WARNING, "FarmersMarket: reload failed.", t);
             return;
         }
         if (warnings == null || warnings.isEmpty()) {
@@ -516,7 +536,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
      */
     private void dropAt(Location where, int count) {
         if (where == null || where.getWorld() == null) {
-            LOG.severe("FarmersMarket: had to drop " + count + " diamonds but no world was "
+            log.severe("FarmersMarket: had to drop " + count + " diamonds but no world was "
                     + "available to drop them in; they are lost. This should not happen.");
             return;
         }
@@ -575,14 +595,14 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
             if (!plugin.isEnabled()) {
                 // The server is shutting down; there is no main thread left to schedule onto,
                 // so the handler -- the delivery, the message, the compensation -- never runs.
-                LOG.log(Level.WARNING, shutdownReconciliationLine(id, what, cause), cause);
+                log.log(Level.WARNING, shutdownReconciliationLine(id, what, cause), cause);
                 return;
             }
             try {
                 plugin.getServer().getScheduler().runTask(plugin, () -> handler.accept(value, cause));
             } catch (RuntimeException e) {
                 // Losing the race against disable, almost always. Never swallowed silently.
-                LOG.log(Level.WARNING, "FarmersMarket: could not schedule a ledger result back "
+                log.log(Level.WARNING, "FarmersMarket: could not schedule a ledger result back "
                         + "onto the main thread.", e);
             }
         });
@@ -656,7 +676,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
      * nothing and is not a retry.
      */
     private void reportUncertain(UUID id, String what, Throwable failure, String extraForPlayer) {
-        LOG.log(Level.WARNING, "FarmersMarket: " + what + " (player " + id + ") did not report a "
+        log.log(Level.WARNING, "FarmersMarket: " + what + " (player " + id + ") did not report a "
                 + "result. The ledger may or may not have applied it; nothing was retried and "
                 + "nothing was compensated. Reconcile this account by hand if the player "
                 + "reports a problem.", failure);
@@ -672,11 +692,11 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
         onMainThread(ledger.balance(id), id, "reading a balance after an unconfirmed operation",
                 (held, readFailure) -> {
                     if (readFailure == null) {
-                        LOG.warning("FarmersMarket: after that unconfirmed operation, " + id
+                        log.warning("FarmersMarket: after that unconfirmed operation, " + id
                                 + "'s balance now reads " + held.format() + " diamonds.");
                         return;
                     }
-                    LOG.log(Level.WARNING, "FarmersMarket: could not read " + id + "'s balance "
+                    log.log(Level.WARNING, "FarmersMarket: could not read " + id + "'s balance "
                             + "after that unconfirmed operation, so the log cannot say whether "
                             + "it landed.", readFailure);
                 });

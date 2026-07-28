@@ -45,7 +45,29 @@ public final class LedgerException extends RuntimeException {
         AMOUNT_TOO_LARGE,
 
         /** A negative amount was handed to an operation that only accepts non-negative ones. */
-        NEGATIVE_AMOUNT
+        NEGATIVE_AMOUNT,
+
+        /**
+         * Storage failed, and the failure provably happened <b>before any write was attempted</b>
+         * -- so the operation is a definite refusal, not an unknown outcome.
+         *
+         * <p><b>This reason is a promise about money, and it may only be set where that promise
+         * can be proved.</b> The command layer treats every {@link LedgerException} as
+         * definitely-not-applied and compensates accordingly: a deposit hands the player's items
+         * straight back. If this reason were ever set for a failure that might have committed,
+         * those items would be handed back on top of a credit that landed, and that is a dupe.
+         * A dupe is silent, repeatable, and spreads through every later trade with no marker on
+         * it; an undelivered stack self-reports within minutes. So the rule is one-directional:
+         * anything not provably pre-write stays an ordinary {@code SQLException} and reaches the
+         * player as an unknown outcome, with the items held and a log line for a human.
+         *
+         * <p>Today exactly one kind of site qualifies: the balance {@code SELECT} that
+         * {@code deposit} and {@code withdraw} each run before their {@code UPDATE}. A read that
+         * throws has written nothing. Both operations answer that question through the same
+         * method, on purpose -- two paths answering "was anything written?" differently is the
+         * shape that produced this plugin's one money-creation bug.
+         */
+        NOTHING_WRITTEN
     }
 
     private final Reason reason;
