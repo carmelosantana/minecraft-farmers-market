@@ -93,6 +93,22 @@ class TransactionRunnerTest {
         }
     }
 
+    @Test
+    void twoDifferentRunnersOverOneConnectionStillRefuseToNest(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(dir.resolve("m.db"), dir.resolve("tmp").toString(), 5000)) {
+            Migrations.applyTo(db.connection());
+            // The whole reason the guard reads the connection's autocommit state rather than an
+            // instance re-entrancy count: the ledger holds one runner and MarketService holds
+            // another over the SAME connection, and an inner transaction on the second, opened
+            // from inside the first's, must still be refused. The single-instance sibling above
+            // could pass on a purely instance-based guard; this one cannot.
+            TransactionRunner outer = new TransactionRunner(db);
+            TransactionRunner inner = new TransactionRunner(db);
+            assertThrows(IllegalStateException.class, () -> outer.inTransaction(() ->
+                    inner.inTransaction(() -> null)));
+        }
+    }
+
     private static long scalarLong(Connection connection, String sql) throws SQLException {
         try (Statement statement = connection.createStatement();
                 ResultSet rows = statement.executeQuery(sql)) {

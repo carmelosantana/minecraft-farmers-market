@@ -144,6 +144,36 @@ class MigrationsTest {
         }
     }
 
+    @Test
+    void tradesRefusesATaxThatDoesNotSplitIntoBurnedPlusPot(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(dir.resolve("m.db"), dir.resolve("tmp").toString(), 5000)) {
+            Migrations.applyTo(db.connection());
+            // This row CONSERVES gross = net + tax (100 = 93 + 7) yet VIOLATES tax = burned + pot
+            // (7 != 3 + 3), so only the second CHECK can refuse it. Its sibling
+            // tradesRefusesANonConservingRow trips the first CHECK while satisfying this one, so
+            // without this test deleting the tax = burned + pot CHECK leaves every test green.
+            assertThrows(SQLException.class, () -> exec(db.connection(),
+                    "INSERT INTO trades(happened_at,buyer_uuid,seller_uuid,item_class,item_key,"
+                  + "material_key,amount,gross_dust,tax_dust,tax_burned_dust,tax_pot_dust,net_dust)"
+                  + " VALUES (1,'b','s','UNIQUE','k','DIAMOND_SWORD',1,100,7,3,3,93)"));
+        }
+    }
+
+    @Test
+    void tradesRefusesANegativeComponentThatStillBalances(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(dir.resolve("m.db"), dir.resolve("tmp").toString(), 5000)) {
+            Migrations.applyTo(db.connection());
+            // Both conservation equalities hold -- gross 0 = net 0 + tax 0, and tax 0 = burned 1 +
+            // pot -1 -- so only the non-negativity CHECK can refuse a negative component. Without
+            // this test deleting that CHECK leaves every test green, since every other trades row
+            // uses non-negative components.
+            assertThrows(SQLException.class, () -> exec(db.connection(),
+                    "INSERT INTO trades(happened_at,buyer_uuid,seller_uuid,item_class,item_key,"
+                  + "material_key,amount,gross_dust,tax_dust,tax_burned_dust,tax_pot_dust,net_dust)"
+                  + " VALUES (1,'b','s','UNIQUE','k','DIAMOND_SWORD',1,0,0,1,-1,0)"));
+        }
+    }
+
     /**
      * An {@link Error} part-way through a migration must roll the whole migration back.
      *

@@ -538,8 +538,30 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                         message(id, text("Bought #" + listingId + " for "
                                 + result.split().gross().format() + " diamonds (tax "
                                 + result.split().tax().format() + "). Enjoy!", NamedTextColor.GREEN));
-                        deliverItemOrHold(id, BukkitItemCodec.decode(result.itemBytes()),
-                                result.amount(), result.summary(), "PURCHASE");
+                        ItemStack bought;
+                        try {
+                            bought = BukkitItemCodec.decode(result.itemBytes());
+                        } catch (RuntimeException corrupt) {
+                            // The sale has ALREADY committed -- money moved, listing SOLD -- and the
+                            // escrowed unique can no longer be built into an ItemStack (a Paper or
+                            // registry change across a server upgrade while it sat listed). The buyer
+                            // is charged; losing the item here would be a silent loss. The raw bytes
+                            // still survive, so hold them for claim from the bytes themselves rather
+                            // than decoding -- claimNext's own decode-guard skips-and-logs a
+                            // permanently-undecodable row on the claim side. Same reconciliation
+                            // standard as reportUncertain: name the player, listing, and operation.
+                            log.log(Level.WARNING, "FarmersMarket: buyer " + id + " bought listing "
+                                    + listingId + " but its escrowed item could not be decoded after "
+                                    + "the sale committed; holding the raw bytes in /market claim for "
+                                    + "an admin to recover. The buyer was charged and the sale is "
+                                    + "final -- no money is compensated.", corrupt);
+                            holdBytesForClaim(id, result.itemBytes(), result.amount(),
+                                    result.summary(), "PURCHASE",
+                                    "Your purchased item could not be delivered just now; it is "
+                                            + "waiting in /market claim.");
+                            return;
+                        }
+                        deliverItemOrHold(id, bought, result.amount(), result.summary(), "PURCHASE");
                         return;
                     }
                     if (failure instanceof MarketException refused) {
@@ -566,11 +588,35 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
         onMainThread(market.cancel(id, listingId, System.currentTimeMillis()), id,
                 "cancelling listing " + listingId, (bytes, failure) -> {
                     if (failure == null) {
-                        ItemStack stack = BukkitItemCodec.decode(bytes);
                         message(id, text("Cancelled listing #" + listingId + ".",
                                 NamedTextColor.GREEN));
-                        deliverItemOrHold(id, stack, stack.getAmount(),
-                                BukkitItemCodec.encode(stack).summary(), "CANCELLED");
+                        ItemStack stack;
+                        String summary;
+                        try {
+                            stack = BukkitItemCodec.decode(bytes);
+                            summary = BukkitItemCodec.encode(stack).summary();
+                        } catch (RuntimeException corrupt) {
+                            // The cancel has ALREADY committed -- the listing is CANCELLED -- and the
+                            // escrowed item can no longer be decoded (a Paper or registry change
+                            // while it sat listed). Dropping it here would be a silent loss, so hold
+                            // the raw bytes for claim rather than the decoded stack; claimNext's own
+                            // decode-guard skips-and-logs a permanently-undecodable row on the claim
+                            // side. amount 1 and a generic summary only satisfy the pending row's
+                            // amount > 0 / NOT NULL constraints -- the true amount is unknown without
+                            // a decodable stack, and the row is never actually handed over anyway.
+                            // Same reconciliation standard as reportUncertain.
+                            log.log(Level.WARNING, "FarmersMarket: seller " + id + " cancelled listing "
+                                    + listingId + " but its escrowed item could not be decoded after "
+                                    + "the cancel committed; holding the raw bytes in /market claim for "
+                                    + "an admin to recover.", corrupt);
+                            holdBytesForClaim(id, bytes, 1,
+                                    "Unreadable cancelled item (listing #" + listingId + ")",
+                                    "CANCELLED",
+                                    "Your cancelled item could not be returned just now; it is "
+                                            + "waiting in /market claim.");
+                            return;
+                        }
+                        deliverItemOrHold(id, stack, stack.getAmount(), summary, "CANCELLED");
                         return;
                     }
                     if (failure instanceof MarketException refused) {
@@ -809,7 +855,25 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
      */
     private void holdForClaim(UUID id, ItemStack stack, int amount, String summary, String reason,
             String heldNote) {
-        byte[] bytes = stack.serializeAsBytes();
+        holdBytesForClaim(id, stack.serializeAsBytes(), amount, summary, reason, heldNote);
+    }
+
+    /**
+     * The raw-bytes core of {@link #holdForClaim}: records item bytes as owed even when no
+     * {@link ItemStack} can be built from them.
+     *
+     * <p>This is the path a <em>post-commit</em> decode failure on {@code buy} or {@code cancel}
+     * takes. The sale or cancellation is already final and the bytes are all that survive of a
+     * unique whose registry changed under it (a Paper upgrade while it sat listed), so they are
+     * held verbatim for {@code /market claim} rather than lost -- the {@code pending_items} row
+     * stores {@code item_bytes} regardless of whether a stack can be decoded, and {@code claimNext}
+     * guards decode on the claim side, so a permanently-undecodable row is skipped-and-logged there
+     * and never handed over as a broken item. If even this insert is refused, the bytes remain on
+     * the {@code SOLD}/{@code CANCELLED} listing row they came from, so this reports an uncertain
+     * escrow rather than dropping or duplicating anything. No money moves on this path.
+     */
+    private void holdBytesForClaim(UUID id, byte[] bytes, int amount, String summary, String reason,
+            String heldNote) {
         onMainThread(market.holdForClaim(id, bytes, amount, summary, reason,
                 System.currentTimeMillis()), id, "holding " + summary + " for claim",
                 (pendingId, failure) -> {

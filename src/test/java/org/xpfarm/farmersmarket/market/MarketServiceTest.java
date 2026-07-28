@@ -95,6 +95,10 @@ class MarketServiceTest {
         long id = service.list(SELLER, uniqueItem(), Diamonds.ofDiamonds(100), 40, NOW, 14).get();
 
         service.buy(BUYER, id, 7.0, 0.5, NOW).get();
+        // The refusal is reached by the pre-read short-circuit, not the markSold != 1 row-count
+        // guard: settle's findActiveListing (SELECT ... WHERE status='ACTIVE') returns empty for
+        // the now-SOLD listing and orElseThrows LISTING_UNAVAILABLE before markSold is ever
+        // called. The != 1 guard is pinned directly in MarketDaoTest.markSoldAffectsExactlyOne...
         ExecutionException thrown = assertThrows(ExecutionException.class,
                 () -> service.buy(OTHER, id, 7.0, 0.5, NOW).get());
 
@@ -156,7 +160,11 @@ class MarketServiceTest {
         PendingItemRow claimed = service.claimOne(SELLER, pendingId, later).get();
         assertEquals(pendingId, claimed.id(), "the first claim returns the owed row");
 
-        // The second claim must not succeed a second delivery: the markClaimed != 1 guard fires.
+        // The second claim must not succeed a second delivery. It is refused by the pre-read
+        // short-circuit, not the markClaimed != 1 row-count guard: claimOne reads unclaimedFor
+        // (WHERE claimed_at IS NULL), the already-claimed row is absent, and it orElseThrows
+        // LISTING_UNAVAILABLE before markClaimed is ever called. The != 1 guard itself is pinned
+        // directly in MarketDaoTest.secondMarkClaimedIsANoOp.
         ExecutionException thrown = assertThrows(ExecutionException.class,
                 () -> service.claimOne(SELLER, pendingId, later).get());
         assertEquals(MarketException.Reason.LISTING_UNAVAILABLE,
