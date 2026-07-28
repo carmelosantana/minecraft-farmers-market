@@ -107,9 +107,9 @@ class MarketDaoTest {
     void markSoldAffectsExactlyOneRowThenZeroOnASecondCall() throws SQLException {
         long id = dao.insertListing(activeListing(UUID.randomUUID()));
 
-        assertEquals(1, affectedByMarkSold(id, UUID.randomUUID(), 5_000L),
+        assertEquals(1, dao.markSold(id, UUID.randomUUID(), 5_000L),
                 "the first markSold of an ACTIVE listing must update exactly one row");
-        assertEquals(0, affectedByMarkSold(id, UUID.randomUUID(), 6_000L),
+        assertEquals(0, dao.markSold(id, UUID.randomUUID(), 6_000L),
                 "a second markSold must update zero rows -- this is the sale's double-buy guard");
     }
 
@@ -132,7 +132,10 @@ class MarketDaoTest {
         UUID seller = UUID.randomUUID();
         long id = dao.insertListing(activeListing(seller));
 
-        dao.markStatus(id, ListingStatus.CANCELLED, 7_000L);
+        assertEquals(1, dao.markStatus(id, ListingStatus.CANCELLED, 7_000L),
+                "cancelling an ACTIVE listing must change exactly one row");
+        assertEquals(0, dao.markStatus(id, ListingStatus.EXPIRED, 8_000L),
+                "a second transition off ACTIVE must change zero rows");
 
         assertEquals(ListingStatus.CANCELLED, dao.findListing(id).orElseThrow().status());
         assertEquals(0, dao.countActiveBySeller(seller));
@@ -242,8 +245,8 @@ class MarketDaoTest {
         long id = dao.insertPending(new PendingItemRow(0, owner, new byte[] {1}, 1, "1 sword",
                 "sold-listing", 1_000L, null));
 
-        assertEquals(1, affectedByMarkClaimed(id, 3_000L));
-        assertEquals(0, affectedByMarkClaimed(id, 4_000L),
+        assertEquals(1, dao.markClaimed(id, 3_000L));
+        assertEquals(0, dao.markClaimed(id, 4_000L),
                 "a second claim must affect zero rows so an item cannot be granted twice");
     }
 
@@ -274,28 +277,6 @@ class MarketDaoTest {
     private static ListingRow listingExpiringAt(UUID seller, long expiresAt) {
         return new ListingRow(0, seller, ItemClass.UNIQUE, "k", "DIAMOND_SWORD", null, "a sword",
                 1, 500L, new byte[] {1}, 0L, expiresAt, ListingStatus.ACTIVE, null, null);
-    }
-
-    /** Runs the same UPDATE as {@link MarketDao#markSold} and returns the affected-row count. */
-    private int affectedByMarkSold(long id, UUID buyer, long soldAt) throws SQLException {
-        String sql = "UPDATE listings SET status = 'SOLD', buyer_uuid = ?, sold_at = ? "
-                + "WHERE id = ? AND status = 'ACTIVE'";
-        try (var ps = database.connection().prepareStatement(sql)) {
-            ps.setString(1, buyer.toString());
-            ps.setLong(2, soldAt);
-            ps.setLong(3, id);
-            return ps.executeUpdate();
-        }
-    }
-
-    /** Runs the same UPDATE as {@link MarketDao#markClaimed} and returns the affected-row count. */
-    private int affectedByMarkClaimed(long id, long at) throws SQLException {
-        String sql = "UPDATE pending_items SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL";
-        try (var ps = database.connection().prepareStatement(sql)) {
-            ps.setLong(1, at);
-            ps.setLong(2, id);
-            return ps.executeUpdate();
-        }
     }
 
     /** Reads back the single {@code trades} row this test inserted. */

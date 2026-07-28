@@ -182,16 +182,19 @@ public final class MarketDao {
     }
 
     /**
-     * Marks the listing sold, but only if it is still {@code ACTIVE}. The caller checks the
-     * affected-row count is exactly 1: that guard is what makes a concurrent double-buy safe,
-     * since only the first {@code markSold} of an {@code ACTIVE} listing updates a row.
+     * Marks the listing sold, but only if it is still {@code ACTIVE}, and returns how many rows
+     * that changed -- {@code 1} for a fresh sale, {@code 0} if the listing had already left
+     * {@code ACTIVE}. The caller checks that count is exactly 1: that guard is what makes a
+     * concurrent double-buy safe, since only the first {@code markSold} of an {@code ACTIVE}
+     * listing updates a row.
      *
      * @param id            the listing to mark sold
      * @param buyer         the purchasing player
      * @param soldAtEpochMs when the sale completed, epoch milliseconds
+     * @return the number of rows updated: {@code 1} if the listing was {@code ACTIVE}, else {@code 0}
      * @throws SQLException if the write fails
      */
-    public void markSold(long id, UUID buyer, long soldAtEpochMs) throws SQLException {
+    public int markSold(long id, UUID buyer, long soldAtEpochMs) throws SQLException {
         Objects.requireNonNull(buyer, "buyer");
         String sql = "UPDATE listings SET status = 'SOLD', buyer_uuid = ?, sold_at = ? "
                 + "WHERE id = ? AND status = 'ACTIVE'";
@@ -199,27 +202,30 @@ public final class MarketDao {
             ps.setString(1, buyer.toString());
             ps.setLong(2, soldAtEpochMs);
             ps.setLong(3, id);
-            ps.executeUpdate();
+            return ps.executeUpdate();
         }
     }
 
     /**
      * Transitions an {@code ACTIVE} listing to {@code CANCELLED} or {@code EXPIRED}, stamping
-     * {@code sold_at} with the transition time. Only an {@code ACTIVE} listing is affected.
+     * {@code sold_at} with the transition time, and returns how many rows changed. Only an
+     * {@code ACTIVE} listing is affected, so a caller can treat {@code 1} as "I made this
+     * transition" and {@code 0} as "someone else already did".
      *
      * @param id        the listing to transition
      * @param status    the terminal status to move it to
      * @param atEpochMs when the transition happened, epoch milliseconds
+     * @return the number of rows updated: {@code 1} if the listing was {@code ACTIVE}, else {@code 0}
      * @throws SQLException if the write fails
      */
-    public void markStatus(long id, ListingStatus status, long atEpochMs) throws SQLException {
+    public int markStatus(long id, ListingStatus status, long atEpochMs) throws SQLException {
         Objects.requireNonNull(status, "status");
         String sql = "UPDATE listings SET status = ?, sold_at = ? WHERE id = ? AND status = 'ACTIVE'";
         try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
             ps.setString(1, status.name());
             ps.setLong(2, atEpochMs);
             ps.setLong(3, id);
-            ps.executeUpdate();
+            return ps.executeUpdate();
         }
     }
 
@@ -331,19 +337,22 @@ public final class MarketDao {
     }
 
     /**
-     * Marks an owed item claimed, but only if it is still unclaimed. As with {@link #markSold},
-     * the {@code claimed_at IS NULL} guard makes a double-claim a no-op rather than a second grant.
+     * Marks an owed item claimed, but only if it is still unclaimed, and returns how many rows
+     * changed. As with {@link #markSold}, the {@code claimed_at IS NULL} guard makes a
+     * double-claim a no-op: the first call returns {@code 1}, a second returns {@code 0}, so an
+     * item cannot be granted twice.
      *
      * @param id        the owed-item row to mark claimed
      * @param atEpochMs when it was claimed, epoch milliseconds
+     * @return the number of rows updated: {@code 1} if it was unclaimed, else {@code 0}
      * @throws SQLException if the write fails
      */
-    public void markClaimed(long id, long atEpochMs) throws SQLException {
+    public int markClaimed(long id, long atEpochMs) throws SQLException {
         String sql = "UPDATE pending_items SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL";
         try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
             ps.setLong(1, atEpochMs);
             ps.setLong(2, id);
-            ps.executeUpdate();
+            return ps.executeUpdate();
         }
     }
 
@@ -415,7 +424,9 @@ public final class MarketDao {
     /** Returns the single generated key from {@code ps}, which must have just inserted one row. */
     private static long generatedId(PreparedStatement ps) throws SQLException {
         try (ResultSet keys = ps.getGeneratedKeys()) {
-            keys.next();
+            if (!keys.next()) {
+                throw new SQLException("no generated key returned");
+            }
             return keys.getLong(1);
         }
     }
