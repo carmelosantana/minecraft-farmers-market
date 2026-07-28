@@ -467,10 +467,13 @@ https://github.com/carmelosantana/minecraft-farmers-market/releases/tag/v0.2.0
 
 ## 10. Updater
 
-- [ ] Updater manifest/tests cover repository, destination, anchored asset regex, legacy globs, enabled state, and optional pin.
-- [ ] Fresh install, upgrade, no-op, legacy archival, endpoint failure, and checksum failure behaviors pass.
-- [ ] Updater dry-run uses a disposable directory and never a production plugin directory.
-- [ ] Failure retains the installed JAR and default fail-open behavior permits Minecraft startup.
+Gate 10 complete `2026-07-28`. Enrolled in `carmelosantana/minecraft-plugin-updater` at commit
+`ea8fa59` ("Enroll Farmers Market v0.2.0 in the updater manifest").
+
+- [x] Updater manifest/tests cover repository, destination, anchored asset regex, legacy globs, enabled state, and optional pin. Entry: `repo` `carmelosantana/minecraft-farmers-market`, `destination` `farmers-market.jar` (unique across the manifest), `asset_regex` `^farmers-market-[0-9].*\.jar$` (anchored, version-leading digit pinned), `legacy_globs` `["farmers-market-[0-9]*.jar"]`. **No `pin`** — deliberately follows the latest non-prerelease release. **`enabled` absent = default install.** `python3 -m json.tool` OK; `python3 -m unittest discover -s tests` = **11/11 pass**.
+- [x] Fresh install, upgrade, no-op, legacy archival, endpoint failure, and checksum failure behaviors pass. Against a disposable sandbox: **fresh** — `would install v0.2.0` (dry) → `installed v0.2.0` (real, 118,239-byte JAR, matching the v0.2.0 release asset byte-for-byte); **replacement** — a corrupted destination was detected and replaced, the old bytes backed up to `farmers-market.jar.<ts>.bak`; **no-op** — a second real run reported `already current (v0.2.0)`; **legacy archival** — a planted `farmers-market-0.1.0.jar` was matched by the glob and moved to `farmers-market-0.1.0.jar.<ts>.legacy.bak` on install; **endpoint failure** — a live GitHub `HTTP 403` warned `keeping installed JAR` and left it untouched (fail-open, no abort); **checksum/download failure** — covered by the passing unit suite (`test_bad_checksum_preserves_installed_jar`, `test_checksum_parser_rejects_missing_asset`).
+- [x] Updater dry-run uses a disposable directory and never a production plugin directory. All runs used `/tmp/minecraft-plugin-updater-dry-run` and `/tmp/fm-noop` sandboxes with `--plugins-dir`, `--state-file`, and `--backup-dir` all overridden inside the sandbox root; the production `/minecraft` volume was never touched. Sandboxes discarded afterward.
+- [x] Failure retains the installed JAR and default fail-open behavior permits Minecraft startup. Demonstrated live: the `HTTP 403` endpoint failure kept the installed JAR and continued without a non-zero exit (no `--strict`), so a plugin-level failure blocks only that plugin's update, never server startup.
 
 ## 11. Deployment
 
