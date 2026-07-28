@@ -6,7 +6,7 @@ Copy this file for one plugin and replace every `<...>` field. Leave an unchecke
 - Slug: `farmers-market`
 - Repository: `carmelosantana/minecraft-farmers-market`
 - Owner: `Carmelo Santana`
-- Target version: `0.1.0`
+- Target version: `0.2.0`
 - Paper version: `26.1.2 build 74`
 - Java version: `25`
 - Updater destination: `farmers-market.jar`
@@ -316,8 +316,8 @@ The Global Constraints forbade adding one, and the whole-branch review confirmed
 Both boxes were left unchecked at the gate 6 exit and ticked here at gate 8b after verifying the
 evidence. That was a bookkeeping miss in the exit, not missing evidence — but it is worth noting
 that the release gate check is what caught it, which is exactly what that gate check is for.
-- [x] `mvn --batch-mode --no-transfer-progress clean verify` succeeds. `BUILD SUCCESS`, **173 tests, 0 failures, 0 errors, 0 skipped**, on `2026-07-22` at commit `fec0b81`.
-- [x] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded. Exactly one non-`original-*` JAR, `target/farmers-market-0.1.0.jar`. Embedded descriptor verified: `name`, `main`, `api-version: '26.1'`, fully-substituted `version: '0.1.0'`, the `market` command, all three permission nodes, `softdepend`, and `libraries`. **Shading review:** the JAR bundles nothing — `org/bukkit`, `io/papermc`, `org/sqlite`, `org/yaml`, and `org/junit` each return 0 entries, so no server API and no runtime-loaded library leaked in.
+- [x] `mvn --batch-mode --no-transfer-progress clean verify` succeeds. `BUILD SUCCESS`, **173 tests, 0 failures, 0 errors, 0 skipped**, on `2026-07-22` at commit `fec0b81`. **M2 Part 1 (`0.2.0`) re-verified** `2026-07-28` at `main` `e09b06a`: `BUILD SUCCESS`, **255 tests, 0 failures, 0 errors, 0 skipped** — the +82 tests cover the market (`TransactionRunner`, Migration 2 DDL + append-only triggers + conservation `CHECK`s each mutation-verified, item identity/classification, `MarketMath` fee/tax conservation, the atomic `MarketService` sale, and the resolver/command gates).
+- [x] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded. Exactly one non-`original-*` JAR, `target/farmers-market-0.1.0.jar`. Embedded descriptor verified: `name`, `main`, `api-version: '26.1'`, fully-substituted `version: '0.1.0'`, the `market` command, all three permission nodes, `softdepend`, and `libraries`. **Shading review:** the JAR bundles nothing — `org/bukkit`, `io/papermc`, `org/sqlite`, `org/yaml`, and `org/junit` each return 0 entries, so no server API and no runtime-loaded library leaked in. **`0.2.0` re-inspected** `2026-07-28`: exactly one non-`original-*` JAR, `target/farmers-market-0.2.0.jar`; embedded descriptor reads `version: '0.2.0'`, the `market` usage string now names the M2 subcommands, `softdepend: [Floodgate]` and `libraries: org.xerial:sqlite-jdbc:3.53.2.0` unchanged; 43 own classes present, `org/bukkit`/`io/papermc`/`org/sqlite` still 0 entries — no server API or runtime library leaked in.
 
 ### Test-strength discipline
 
@@ -390,6 +390,53 @@ carries them forward as real obligations rather than silence:
 4. **The Floodgate account merge** (check 22) — **the highest-value open question.** Confirm `isFloodgatePlayer(javaUuid)` returns true for an **already-linked** player. If it returns false, the join guard short-circuits and the entire merge feature is dead code that fails silently — the exact outcome the merge exists to prevent. Floodgate is deliberately off the test classpath, so this cannot be settled statically.
 5. **Merge idempotence across repeated joins**, since the merge runs on every join.
 6. **`LinkageError` handling in `EditionResolver`** — reasoned and implemented, but reproducing a raw linkage failure needs a bytecode fixture or custom classloader, both excluded by the no-new-dependency constraint. Unverified, not blocking.
+
+### 7a — 0.2.0 market re-run: PASSED `2026-07-28`
+
+The M2 Part 1 market (`0.2.0`) had never run on a live server; this re-run gates its release. Disposable
+fresh-volume Legendary stack, slot 0, project `xpfarm-plugin-test-farmers-market-b03147f1`. Booted from
+`target/farmers-market-0.2.0.jar` built at `main` `e09b06a` (255/255 `mvn verify`), verified, torn down;
+slot lease released cleanly (`down` exit 0). The rig's `up` self-verified all three preconditions before
+returning: Paper logged its own `Done (18.763s)! For help`; the Java port answered a real handshake
+(`Paper 26.1.2 | protocol 775`); RCON `plugins` listed **four plugins all green** — `FarmersMarket`,
+`floodgate`, `Geyser-Spigot` (2.11.0-SNAPSHOT), `ViaVersion`.
+
+**Enable path + Migration 2 on real SQLite — the new-in-0.2.0 runtime-uncertain surface.**
+`[SpigotLibraryLoader] Loaded library .../sqlite-jdbc-3.53.2.0.jar` → `Loading server plugin
+FarmersMarket v0.2.0` → `database ready at plugins/FarmersMarket/market.db (schema version 2)` →
+`FarmersMarket enabled.` The **`schema version 2`** line is the evidence that mattered: Migration 2's DDL
+— the `listings`, `trades`, and `pending_items` tables, the append-only `BEFORE UPDATE`/`BEFORE DELETE`
+triggers, and the three conservation `CHECK` constraints — executed without error against a real SQLite
+file under the **runtime-loaded** `sqlite-jdbc 3.53.2.0` driver (not the test classpath), applied
+sequentially on top of Migration 1's schema. `FarmersMarket enabled.` printing means `onEnable` ran to
+completion, so the async expiry-sweep task registered without throwing.
+
+**Command surface over RCON.** `/market reload` → `Farmers Market configuration reloaded.` (admin,
+console-allowed). Every player-only subcommand refused the console cleanly with no `ClassCastException`:
+`balance`, `sell 5`, `buy 1`, `cancel 1`, `mine`, `claim` each replied `'<sub>' needs a player with an
+inventory, so the console cannot run it. Console can run /market reload.` An unknown subcommand
+(`/market bogus`) returned the usage string naming exactly the M2 subcommand set. The console-allowed
+read commands (`browse`, `browse 1`, `info 1`, `pot`) were accepted and produced **no RCON output and no
+exception** — they reply from an async DB-read callback that fires after the command method returns, so
+the RCON connection has closed before the reply is dispatched; this is an RCON limitation, not a defect,
+and their rendered output is a gate-12 client concern.
+
+**Clean run.** No `org.xpfarm` stack trace, no `SEVERE`, no exception, and no leaked secret anywhere in
+the run. The only WARN lines were Paper's own self-update notice and a benign `level-type default` parse
+notice — neither from this plugin.
+
+#### What the 0.2.0 re-run could NOT reach — carried to the gate 12 play-test
+
+The market's entire trade loop needs a player inventory, so it is unreachable headlessly. Named here so
+`minecraft-plugin-handoff` carries them as real obligations (the user will run this live in production):
+
+1. **List → buy → claim, end to end.** Escrow deposit on `sell`, the atomic sale (money move + escrow flip + trade-log write in one transaction), the buyer's byte-identical item delivery, and the seller's payout. The whole `MarketService` sale path ran zero times against a real inventory.
+2. **Byte-identical item fidelity.** An enchanted item and a filled shulker box listed, bought, and delivered — confirm `serializeAsBytes`/`deserializeBytes` round-trips identically through escrow, and the shulker's **summary-text** rendering is legible on a Bedrock client (never a raw icon — Geyser #3001).
+3. **Stackable-unique classification, live.** List a tipped arrow, a filled map, a player head, and a firework rocket; confirm each is treated **UNIQUE** (not commodity) as the `hasMeaningfulComponents` fix intends.
+4. **Offline-seller payout + XP listing fee.** Confirm the diamond payout reaches an offline seller's account and the XP fee is actually deducted from the lister at `sell` time.
+5. **Diamond sales tax split, live.** After a real sale, confirm total diamond supply fell by exactly the burn and the remainder credited the nil-UUID community pot (`/market pot` should then render a non-zero balance).
+6. **The post-commit decode-failure hold path.** The whole-branch-review fix: if `BukkitItemCodec.decode` throws after commit (e.g. a server upgrade migrated the bytes), confirm the raw bytes are held for `claim` with a WARNING reconciliation line and no money is double-paid — reachable only with a real item and a decode fault.
+7. **Async listing expiry actually expiring a listing** (the sweep registered but had nothing to expire in a fresh, listing-less DB).
 
 ### 7b — full-roster matrix
 
