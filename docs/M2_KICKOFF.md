@@ -51,20 +51,24 @@ The market. From §1: listings, item identity, commodity offer matching, escrow,
 Still M3-M5, do not build: any GUI or Cumulus form, vendors, `TextDisplay`, stalls, sealed bids,
 price history, indices, map charts.
 
-## STATUS: entry conditions are DONE but UNREVIEWED
+## STATUS: entry conditions MERGED. Next step is the M2 plan.
 
-Branch `feat/m2-entry-conditions`, based on `95cf0a1`, **not merged and not pushed**. `main` is
-still at `95cf0a1` with `v0.1.0` released, so nothing here is at risk.
+`main` is at **`26b2720`** (merge of `feat/m2-entry-conditions`), CI green, branch deleted.
+`v0.1.0` remains the released tag — the entry conditions are unreleased refactor work sitting on
+`main` ahead of the tag, which is correct: they ship with M2, not as their own release.
 
-Six commits: `89a2b77` (ConfigValidator), `b0e8dbf` (upsertAccount + findLink), `673d313`
-(`NOTHING_WRITTEN`), `13dcfdc` (plugin logger), `ef31f92` (re-entrancy notes), `c83b097` (the two
-follow-ups below). **204 tests**, 29 mutations run and all caught. Full detail:
-`.superpowers/sdd/m2-entry-report.md`.
+**204 tests, 29 mutations all caught. Whole-branch review verdict: READY TO MERGE, no changes
+required.** The reviewer independently traced both money paths — the persisted merge balance is the
+overflow-checked `Diamonds` sum (never `AccountMerge`'s raw-long sum), and no path returns items
+after a possible commit — and confirmed the fifth hollow test was genuinely replaced by one the
+blind-`findLink` mutation kills. Full detail: `.superpowers/sdd/m2-entry-report.md`.
 
-**The next step is a review of this branch**, then merge, then write the M2 plan. Do not merge it
-unreviewed — every task on M1 that skipped straight to merge would have shipped a defect.
+**The next step is to write the M2 implementation plan** (task #15). The entry conditions are done;
+do not redo them. New API now available to M2: `AccountDao.upsertAccount(AccountRow)` /
+`findLink(UUID)`, `LedgerException.Reason.NOTHING_WRITTEN`, `Ledger.readBeforeWriting`, and a
+standalone `ConfigValidator` (M2 adds its keys' validation there, matching timber-blast's shape).
 
-Two things were caught and fixed during the work, both worth knowing:
+Two things were caught and fixed during the entry-condition work, both worth knowing:
 
 1. **The M1 mint-bug shape recurred.** `deposit` was narrowed to a definite refusal on a provable
    no-write failure while `withdraw` was left as unknown — "two code paths, same question,
