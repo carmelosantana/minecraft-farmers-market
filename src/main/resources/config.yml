@@ -26,7 +26,13 @@ liquidity:
   # price discovery.
   buyback-enabled: true
 
-  # Item key -> diamond price the server always pays.
+  # Diamond floor price the server always pays, keyed by Bukkit Material name.
+  # Keys MUST be the uppercase Material name (e.g. IRON_INGOT, GOLD_INGOT, DIAMOND) —
+  # a mis-typed or mis-cased key is ignored and NO floor applies to that item. Items
+  # not listed here have no server floor. Values are the floor price in diamonds.
+  # Example:
+  #   IRON_INGOT: 0.5
+  #   GOLD_INGOT: 1.0
   buyback-floors: {}
 
   # Item key -> estimated diamond cost of producing one unit VIA AN AUTOMATED FARM, not by hand.
@@ -46,7 +52,12 @@ limits:
   # so cornering is the realistic threat model.
   buy-limit-enabled: true
   buy-limit-window-hours: 4
-  # Item key -> maximum quantity per window. Items not listed here are unlimited.
+  # Maximum quantity a player may BUY per window, keyed by Bukkit Material name.
+  # Keys MUST be the uppercase Material name (e.g. IRON_INGOT, GOLD_INGOT, DIAMOND) —
+  # a mis-typed or mis-cased key is ignored and that item stays UNLIMITED. Items not
+  # listed here are unlimited. Example:
+  #   IRON_INGOT: 512
+  #   GOLD_INGOT: 256
   buy-limits: {}
   # Playtime before market access unlocks. Raises the cost of a throwaway alt without
   # pretending to defeat a determined one.

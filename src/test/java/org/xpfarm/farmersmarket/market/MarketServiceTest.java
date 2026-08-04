@@ -306,6 +306,70 @@ class MarketServiceTest {
         assertEquals(buyerBalAfterBid + 70_000L, accounts.balanceDust(buyer));
     }
 
+    @Test
+    void buyLimitSeesUncommittedFirstFillWhenCappingSameBuyersSecondBid() throws Exception {
+        // One buyer, two resting bids on the same material. Within ONE marketSell transaction the
+        // buy-limit read must see the FIRST fill's uncommitted trade when it evaluates the second
+        // bid (SQLite read-your-own-writes on one connection), or the cap leaks across bids.
+        UUID seller = UUID.randomUUID();
+        UUID buyer = UUID.randomUUID();
+        seedBalance(seller, 1_000_000L);
+        seedBalance(buyer, 1_000_000L);
+        // Same price, distinct created_at so the book order is deterministic: bid1 (older) first.
+        long bid1 = service.placeBid(buyer, "minecraft:iron_ingot", 20, Diamonds.ofDust(2000L), 0, 1L).get();
+        long bid2 = service.placeBid(buyer, "minecraft:iron_ingot", 20, Diamonds.ofDust(2000L), 0, 2L).get();
+        long buyerBalAfterBids = accounts.balanceDust(buyer); // 1_000_000 - 2*40_000 = 920_000
+        long supplyBefore = totalSupply();
+
+        // Sell 40 into a cap of 30 with an empty window: bid1 fills to 20, then the buy-limit --
+        // seeing bid1's uncommitted 20 -- allows only 10 more on bid2, which is then cancelled and
+        // its remaining escrow refunded. 10 units go unsold (no floor).
+        CommoditySaleResult result = service.marketSell(seller, ironSpec(), 40,
+                7.0, 0.5, /*floorDust*/0L,
+                /*buyLimitEnabled*/true, /*cap*/30, /*window*/3_600_000L, 1_000_000L).get();
+
+        assertEquals(30, result.sold(), "the cap is respected across BOTH bids, not per bid");
+        assertEquals(10, result.unsold(), "the 10 over-cap units could not be bought");
+        assertTrue(market.findActiveOffer(bid1).isEmpty(), "the first bid filled fully (now FILLED)");
+        assertTrue(market.findActiveOffer(bid2).isEmpty(), "the over-cap second bid was cancelled");
+        // bid2 escrowed 40_000; 10 units (20_000) were spent, so 20_000 is refunded.
+        assertEquals(buyerBalAfterBids + 20_000L, accounts.balanceDust(buyer),
+                "the over-cap bid's unspent escrow is refunded to the buyer");
+        assertEquals(supplyBefore - burnedAcrossTrades(), totalSupply(),
+                "supply falls by exactly the burned tax across both fills");
+    }
+
+    @Test
+    void bidPartiallyFilledThenCancelledConservesSupply() throws Exception {
+        // A bid is partially filled by a small sell, then the buyer cancels the remainder. The
+        // headline invariant across the whole sequence: supply falls only by the burned tax.
+        UUID seller = UUID.randomUUID();
+        UUID buyer = UUID.randomUUID();
+        seedBalance(buyer, 100_000L);
+        long supplyBefore = totalSupply();
+        long bidId = service.placeBid(buyer, "minecraft:iron_ingot", 10, Diamonds.ofDust(2000L), 3, 1L).get();
+        long buyerBalAfterBid = accounts.balanceDust(buyer); // 100_000 - 10*2000 = 80_000
+
+        // Partial fill: sell only 4 of the 10 wanted, no floor, no buy limit.
+        CommoditySaleResult result = service.marketSell(seller, ironSpec(), 4,
+                7.0, 0.5, /*floorDust*/0L, /*buyLimitEnabled*/false, /*cap*/-1, /*window*/0L, 100L).get();
+        assertEquals(4, result.sold());
+        assertEquals(0, result.unsold(), "the seller offered only 4 and all 4 were absorbed");
+
+        // After the partial fill the offer is still ACTIVE with reduced qty and escrow.
+        CommodityOfferRow afterFill = market.findActiveOffer(bidId).orElseThrow();
+        assertEquals(6, afterFill.qtyRemaining(), "4 of 10 filled, 6 remain");
+        assertEquals(12_000L, afterFill.escrowedDust(), "escrow fell by 4 x 2000 = 8000, 12000 remains");
+
+        // Buyer cancels the remainder: the unfilled 12_000 escrow comes back, the offer is gone.
+        service.cancelBid(buyer, bidId, 200L).get();
+        assertTrue(market.findActiveOffer(bidId).isEmpty(), "the cancelled bid is no longer active");
+        assertEquals(buyerBalAfterBid + 12_000L, accounts.balanceDust(buyer),
+                "the buyer gets back exactly the unfilled escrow");
+        assertEquals(supplyBefore - burnedAcrossTrades(), totalSupply(),
+                "across partial-fill-then-cancel, supply falls only by the burned tax");
+    }
+
     // ------------------------------------------------------- commodity: cancel bid
 
     @Test
