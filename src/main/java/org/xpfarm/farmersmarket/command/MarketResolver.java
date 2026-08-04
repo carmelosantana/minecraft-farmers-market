@@ -517,8 +517,6 @@ public final class MarketResolver {
                     "You do not have enough diamonds. Deposit some with /market deposit.";
             case NOT_YOUR_LISTING -> "That is not your listing.";
             case TOO_MANY_LISTINGS -> "You have too many listings up. Cancel or sell one first.";
-            case COMMODITY_NOT_YET -> "Only unique items -- enchanted, renamed, damaged, or "
-                    + "custom -- can be listed right now. Bulk trading is coming soon.";
             case NOT_A_COMMODITY -> "That is not a tradable commodity.";
             // Same wording as the ledger's NOTHING_WRITTEN, and for the same reason: the market
             // sets it only when it knows the write never started, so the player is owed a definite

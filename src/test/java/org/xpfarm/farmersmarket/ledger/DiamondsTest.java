@@ -131,6 +131,18 @@ class DiamondsTest {
     }
 
     @Test
+    void timesMultipliesExactly() {
+        assertEquals(Diamonds.ofDust(30_000L), Diamonds.ofDust(3_000L).times(10));
+    }
+
+    @Test
+    void timesRefusesOverflowRatherThanWrapping() {
+        assertEquals(LedgerException.Reason.AMOUNT_TOO_LARGE,
+                assertThrows(LedgerException.class,
+                        () -> Diamonds.ofDust(Long.MAX_VALUE).times(2)).reason());
+    }
+
+    @Test
     void subtractionMayGoNegativeAndSaysSo() {
         Diamonds owed = Diamonds.ofDiamonds(3).minus(Diamonds.ofDiamonds(5));
 

@@ -493,8 +493,8 @@ final class MarketResolverTest {
                 assertNotNull(MarketResolver.messageFor(reason));
                 assertFalse(MarketResolver.messageFor(reason).isBlank());
             }
-            assertTrue(MarketResolver.messageFor(MarketException.Reason.COMMODITY_NOT_YET)
-                    .toLowerCase(Locale.ROOT).contains("unique"));
+            assertTrue(MarketResolver.messageFor(MarketException.Reason.NOT_A_COMMODITY)
+                    .toLowerCase(Locale.ROOT).contains("commodity"));
         }
     }
 }

@@ -207,6 +207,23 @@ public final class Diamonds implements Comparable<Diamonds> {
     }
 
     /**
+     * This amount multiplied by {@code factor}.
+     *
+     * @param factor the whole-number multiplier, such as a stack size or a fill quantity
+     * @return the product; never {@code null}
+     * @throws LedgerException with {@link LedgerException.Reason#AMOUNT_TOO_LARGE} if the product
+     *                          would not fit in a {@code long}, rather than wrapping into a
+     *                          negative balance
+     */
+    public Diamonds times(int factor) {
+        try {
+            return new Diamonds(Math.multiplyExact(dust, (long) factor));
+        } catch (ArithmeticException e) {
+            throw tooLarge(format() + " x " + factor + " does not fit in this ledger", e);
+        }
+    }
+
+    /**
      * Whether this amount is below zero.
      *
      * @return {@code true} only for a strictly negative amount; zero is not negative

@@ -462,7 +462,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
         ListedItem item = BukkitItemCodec.encode(inHand);
         if (item.itemClass() == ItemClass.COMMODITY) {
             // Nothing has been removed or charged.
-            error(player, MarketResolver.messageFor(MarketException.Reason.COMMODITY_NOT_YET));
+            error(player, MarketResolver.messageFor(MarketException.Reason.NOT_A_COMMODITY));
             return;
         }
 

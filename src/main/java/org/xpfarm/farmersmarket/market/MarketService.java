@@ -354,6 +354,245 @@ public final class MarketService {
                 amount, summary, reason, nowEpochMs, null)));
     }
 
+    // ---------------------------------------------------------------- placeBid
+
+    /**
+     * Escrows {@code priceEach x qty} diamonds out of {@code buyer}'s balance and rests an
+     * {@code ACTIVE} bid for {@code qty} units of {@code materialKey}, returning the new offer's id.
+     * The XP fee is <em>not</em> charged here -- it is stored on the row as {@code xp_paid} and
+     * deducted by the command layer after this future succeeds, exactly as {@link #list}'s listing
+     * fee is.
+     *
+     * <p>The whole escrow-and-insert is one transaction so a storage failure of the insert cannot
+     * leave the buyer's balance debited with no bid to show for it. Overflow is refused, not
+     * wrapped, and translated at this boundary just as {@link #buy}'s is: {@link Diamonds#times}
+     * raises {@link LedgerException} on an absurd bid value, which fires inside the transaction,
+     * rolls it back whole, and arrives here as {@link MarketException.Reason#AMOUNT_TOO_LARGE}.
+     *
+     * @param buyer       the player placing the bid
+     * @param materialKey the material the bid is for
+     * @param qty         how many units the bid wants
+     * @param priceEach   the per-unit price the buyer will pay
+     * @param xpFee       the experience the command layer will deduct after this succeeds, recorded
+     *                    on the row for the refund audit trail
+     * @param nowEpochMs  when the bid was placed, epoch milliseconds
+     * @return a future completing with the new offer id, or failing with a {@link MarketException}
+     *         whose reason is {@link MarketException.Reason#INSUFFICIENT_FUNDS} or
+     *         {@link MarketException.Reason#AMOUNT_TOO_LARGE}
+     */
+    public CompletableFuture<Long> placeBid(UUID buyer, String materialKey, int qty,
+            Diamonds priceEach, int xpFee, long nowEpochMs) {
+        Objects.requireNonNull(buyer, "buyer");
+        Objects.requireNonNull(materialKey, "materialKey");
+        Objects.requireNonNull(priceEach, "priceEach");
+        return executor.submit(() -> {
+            try {
+                return transactions.inTransaction(() -> {
+                    // Raw Diamonds arithmetic, no inline overflow catch: an overflow rolls the
+                    // whole transaction back and is translated at this boundary below.
+                    Diamonds escrow = priceEach.times(qty);
+                    Diamonds balance = Diamonds.ofDust(accounts.balanceDust(buyer));
+                    Diamonds after = balance.minus(escrow);
+                    if (after.isNegative()) {
+                        throw new MarketException(MarketException.Reason.INSUFFICIENT_FUNDS,
+                                buyer + " holds " + balance.format() + " but the bid escrows "
+                                        + escrow.format());
+                    }
+                    accounts.upsertBalance(buyer, after.dust());
+                    return market.insertOffer(new CommodityOfferRow(0L, buyer, materialKey, qty,
+                            priceEach.dust(), escrow.dust(), xpFee, nowEpochMs, OfferStatus.ACTIVE));
+                });
+            } catch (LedgerException overflow) {
+                if (overflow.reason() == LedgerException.Reason.AMOUNT_TOO_LARGE) {
+                    throw new MarketException(MarketException.Reason.AMOUNT_TOO_LARGE,
+                            "the bid of " + qty + " x " + priceEach.format() + " overflowed", overflow);
+                }
+                throw overflow;
+            } catch (ArithmeticException overflow) {
+                throw new MarketException(MarketException.Reason.AMOUNT_TOO_LARGE,
+                        "the bid of " + qty + " x " + priceEach.format() + " overflowed", overflow);
+            }
+        });
+    }
+
+    // -------------------------------------------------------------- marketSell
+
+    /**
+     * The atomic multi-fill: sells up to {@code qty} units of {@code spec} against the resting bid
+     * book best-first, taxing each player fill, then dumps whatever the book could not absorb to the
+     * community-pot floor at {@code floorPriceDust}, untaxed and bounded by the pot's balance. The
+     * whole sale is one transaction that commits or rolls back whole.
+     *
+     * <p>Every diamond move goes through {@link Diamonds} -- {@code .plus}, {@code .minus},
+     * {@code .times} -- never a raw {@code long} add, so an overflow refuses with
+     * {@link MarketException.Reason#AMOUNT_TOO_LARGE} (translated at this boundary, exactly as
+     * {@link #buy}'s is) instead of wrapping a balance negative. A seller never fills their own
+     * bid. When the rolling buy-limit stops a bidder short of their bid, that bid's remainder is
+     * cancelled and its escrow refunded in the same transaction. The floor's bought stock is not
+     * destroyed: it is credited to the pot's {@code pending_items} so item conservation mirrors
+     * money conservation.
+     *
+     * @param seller            the player selling into the book
+     * @param spec              the commodity being sold, in canonical single-unit form
+     * @param qty               how many units the seller offered
+     * @param salesTaxPercent   the sales-tax rate on player fills, as a config-supplied percentage
+     * @param taxBurnShare      the fraction of the tax to burn, as a config-supplied share of one
+     * @param floorPriceDust    the per-unit price the pot pays for the remainder; {@code 0} disables
+     *                          the floor entirely
+     * @param buyLimitEnabled   whether the rolling per-buyer purchase limit is in force
+     * @param buyLimitCap       the most units one buyer may buy in the window; negative means no cap
+     * @param buyLimitWindowMs  the width of the rolling buy-limit window, in milliseconds
+     * @param nowEpochMs        when the sale completes, epoch milliseconds
+     * @return a future completing with the {@link CommoditySaleResult}, or failing with a
+     *         {@link MarketException} whose reason is {@link MarketException.Reason#NOTHING_WRITTEN}
+     *         or {@link MarketException.Reason#AMOUNT_TOO_LARGE}
+     */
+    public CompletableFuture<CommoditySaleResult> marketSell(UUID seller, CommoditySpec spec, int qty,
+            double salesTaxPercent, double taxBurnShare, long floorPriceDust,
+            boolean buyLimitEnabled, int buyLimitCap, long buyLimitWindowMs, long nowEpochMs) {
+        Objects.requireNonNull(seller, "seller");
+        Objects.requireNonNull(spec, "spec");
+        return executor.submit(() -> {
+            try {
+                return transactions.inTransaction(() -> {
+                    int remaining = qty;
+                    Diamonds proceeds = Diamonds.ZERO;
+
+                    for (CommodityOfferRow bid : market.bestActiveBids(spec.materialKey(), 256)) {
+                        if (remaining == 0) {
+                            break;
+                        }
+                        if (bid.buyer().equals(seller)) {
+                            continue; // a seller may never fill their own bid
+                        }
+                        int allowance = Integer.MAX_VALUE;
+                        if (buyLimitEnabled) {
+                            int used = market.buyLimitUsage(bid.buyer(), spec.materialKey(),
+                                    nowEpochMs - buyLimitWindowMs);
+                            allowance = CommodityMath.remainingBuyAllowance(buyLimitCap, used);
+                        }
+                        int take = Math.min(Math.min(remaining, bid.qtyRemaining()), allowance);
+                        if (take > 0) {
+                            Diamonds gross = Diamonds.ofDust(bid.priceEachDust()).times(take);
+                            MarketMath.TaxSplit split =
+                                    MarketMath.taxOnSale(gross, salesTaxPercent, taxBurnShare);
+
+                            accounts.upsertBalance(seller,
+                                    Diamonds.ofDust(accounts.balanceDust(seller)).plus(split.net()).dust());
+                            accounts.upsertBalance(SystemAccounts.COMMUNITY_POT,
+                                    Diamonds.ofDust(accounts.balanceDust(SystemAccounts.COMMUNITY_POT))
+                                            .plus(split.toPot()).dust());
+                            // split.burned() is credited to nobody -- that is the sink.
+
+                            if (market.spendFromOffer(bid.id(), take, gross.dust()) != 1) {
+                                throw new MarketException(MarketException.Reason.NOTHING_WRITTEN,
+                                        "offer " + bid.id() + " left ACTIVE mid-fill; rolling back");
+                            }
+                            market.insertPending(new PendingItemRow(0L, bid.buyer(), spec.oneItemBytes(),
+                                    take, take + "x " + spec.displayName(), "commodity purchase",
+                                    nowEpochMs, null));
+                            market.insertTrade(new TradeRow(0L, nowEpochMs, bid.buyer(), seller,
+                                    ItemClass.COMMODITY, spec.itemKey(), spec.materialKey(), take,
+                                    gross.dust(), split.tax().dust(), split.burned().dust(),
+                                    split.toPot().dust(), split.net().dust(), null));
+
+                            proceeds = proceeds.plus(split.net());
+                            remaining -= take;
+                        }
+                        // fill-to-cap-then-cancel: if the buy limit stopped this bidder short of
+                        // their bid, cancel the bid's remainder and refund its escrow.
+                        if (buyLimitEnabled && take < bid.qtyRemaining()) {
+                            CommodityOfferRow live = market.findActiveOffer(bid.id()).orElse(null);
+                            if (live != null && CommodityMath.remainingBuyAllowance(buyLimitCap,
+                                    market.buyLimitUsage(bid.buyer(), spec.materialKey(),
+                                            nowEpochMs - buyLimitWindowMs)) == 0) {
+                                accounts.upsertBalance(bid.buyer(),
+                                        Diamonds.ofDust(accounts.balanceDust(bid.buyer()))
+                                                .plus(Diamonds.ofDust(live.escrowedDust())).dust());
+                                if (market.cancelOffer(bid.id()) != 1) {
+                                    throw new MarketException(MarketException.Reason.NOTHING_WRITTEN,
+                                            "offer " + bid.id() + " could not be cancelled at cap");
+                                }
+                            }
+                        }
+                    }
+
+                    // Floor: sell the remainder to the pot at the floor price, bounded by the pot
+                    // balance. Untaxed -- the floor is a price support, not a taxed trade.
+                    if (remaining > 0 && floorPriceDust > 0) {
+                        long potDust = accounts.balanceDust(SystemAccounts.COMMUNITY_POT);
+                        int affordable = CommodityMath.floorFillableByPot(remaining, potDust, floorPriceDust);
+                        if (affordable > 0) {
+                            Diamonds gross = Diamonds.ofDust(floorPriceDust).times(affordable);
+                            accounts.upsertBalance(SystemAccounts.COMMUNITY_POT,
+                                    Diamonds.ofDust(potDust).minus(gross).dust());
+                            accounts.upsertBalance(seller,
+                                    Diamonds.ofDust(accounts.balanceDust(seller)).plus(gross).dust());
+                            market.insertPending(new PendingItemRow(0L, SystemAccounts.COMMUNITY_POT,
+                                    spec.oneItemBytes(), affordable, affordable + "x " + spec.displayName(),
+                                    "floor buyback", nowEpochMs, null));
+                            market.insertTrade(new TradeRow(0L, nowEpochMs, SystemAccounts.COMMUNITY_POT,
+                                    seller, ItemClass.COMMODITY, spec.itemKey(), spec.materialKey(),
+                                    affordable, gross.dust(), 0L, 0L, 0L, gross.dust(), null)); // untaxed
+                            proceeds = proceeds.plus(gross);
+                            remaining -= affordable;
+                        }
+                    }
+
+                    return new CommoditySaleResult(qty - remaining, remaining, proceeds);
+                });
+            } catch (LedgerException overflow) {
+                if (overflow.reason() == LedgerException.Reason.AMOUNT_TOO_LARGE) {
+                    throw new MarketException(MarketException.Reason.AMOUNT_TOO_LARGE,
+                            "a commodity sale of " + spec.materialKey() + " overflowed a balance",
+                            overflow);
+                }
+                throw overflow;
+            } catch (ArithmeticException overflow) {
+                throw new MarketException(MarketException.Reason.AMOUNT_TOO_LARGE,
+                        "the tax split for a commodity sale of " + spec.materialKey() + " overflowed",
+                        overflow);
+            }
+        });
+    }
+
+    // --------------------------------------------------------------- cancelBid
+
+    /**
+     * Takes {@code buyer}'s resting bid down and refunds whatever escrow it still holds. The
+     * find-check-refund-cancel runs in one transaction so the offer's status cannot change under it,
+     * mirroring {@link #cancel}'s structure. The XP fee the buyer paid to place the bid is <em>not</em>
+     * refunded -- it was an anti-spam cost, not escrow.
+     *
+     * @param buyer      the player cancelling; must own the offer
+     * @param offerId    the offer to cancel
+     * @param nowEpochMs when the cancellation happened, epoch milliseconds
+     * @return a future completing with {@code null}, or failing with a {@link MarketException} whose
+     *         reason is {@link MarketException.Reason#LISTING_UNAVAILABLE},
+     *         {@link MarketException.Reason#NOT_YOUR_LISTING}, or
+     *         {@link MarketException.Reason#NOTHING_WRITTEN}
+     */
+    public CompletableFuture<Void> cancelBid(UUID buyer, long offerId, long nowEpochMs) {
+        Objects.requireNonNull(buyer, "buyer");
+        return executor.submit(() -> transactions.inTransaction(() -> {
+            CommodityOfferRow offer = market.findActiveOffer(offerId)
+                    .orElseThrow(() -> new MarketException(MarketException.Reason.LISTING_UNAVAILABLE,
+                            "offer " + offerId + " is not active"));
+            if (!offer.buyer().equals(buyer)) {
+                throw new MarketException(MarketException.Reason.NOT_YOUR_LISTING,
+                        "offer " + offerId + " belongs to someone else");
+            }
+            accounts.upsertBalance(buyer, Diamonds.ofDust(accounts.balanceDust(buyer))
+                    .plus(Diamonds.ofDust(offer.escrowedDust())).dust());
+            if (market.cancelOffer(offerId) != 1) {
+                // Same single-writer anomaly guard as the sale's spendFromOffer==1.
+                throw new MarketException(MarketException.Reason.NOTHING_WRITTEN,
+                        "offer " + offerId + " left ACTIVE mid-cancel; rolling back");
+            }
+            return null;
+        }));
+    }
+
     // ------------------------------------------------------------- read helpers
 
     /**
@@ -408,5 +647,28 @@ public final class MarketService {
     public CompletableFuture<List<PendingItemRow>> pendingFor(UUID owner) {
         Objects.requireNonNull(owner, "owner");
         return executor.submit(() -> market.unclaimedFor(owner));
+    }
+
+    /**
+     * A buyer's still-{@code ACTIVE} bids, newest first -- the ones they can still cancel.
+     *
+     * @param buyer the buyer to read
+     * @return a future completing with the buyer's active bids
+     */
+    public CompletableFuture<List<CommodityOfferRow>> myBids(UUID buyer) {
+        Objects.requireNonNull(buyer, "buyer");
+        return executor.submit(() -> market.offersByBuyer(buyer, OfferStatus.ACTIVE));
+    }
+
+    /**
+     * The highest price any {@code ACTIVE} bid is offering for {@code materialKey}, or
+     * {@link Optional#empty()} if the book holds no resting bid for it.
+     *
+     * @param materialKey the material to read the best bid for
+     * @return a future completing with the best bid price in dust, or empty when the book is empty
+     */
+    public CompletableFuture<Optional<Long>> bestBidDust(String materialKey) {
+        Objects.requireNonNull(materialKey, "materialKey");
+        return executor.submit(() -> market.bestBidPriceDust(materialKey));
     }
 }
