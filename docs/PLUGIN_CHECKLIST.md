@@ -6,7 +6,7 @@ Copy this file for one plugin and replace every `<...>` field. Leave an unchecke
 - Slug: `farmers-market`
 - Repository: `carmelosantana/minecraft-farmers-market`
 - Owner: `Carmelo Santana`
-- Target version: `0.2.0`
+- Target version: `0.3.0`
 - Paper version: `26.1.2 build 74`
 - Java version: `25`
 - Updater destination: `farmers-market.jar`
@@ -317,7 +317,7 @@ Both boxes were left unchecked at the gate 6 exit and ticked here at gate 8b aft
 evidence. That was a bookkeeping miss in the exit, not missing evidence — but it is worth noting
 that the release gate check is what caught it, which is exactly what that gate check is for.
 - [x] `mvn --batch-mode --no-transfer-progress clean verify` succeeds. `BUILD SUCCESS`, **173 tests, 0 failures, 0 errors, 0 skipped**, on `2026-07-22` at commit `fec0b81`. **M2 Part 1 (`0.2.0`) re-verified** `2026-07-28` at `main` `e09b06a`: `BUILD SUCCESS`, **255 tests, 0 failures, 0 errors, 0 skipped** — the +82 tests cover the market (`TransactionRunner`, Migration 2 DDL + append-only triggers + conservation `CHECK`s each mutation-verified, item identity/classification, `MarketMath` fee/tax conservation, the atomic `MarketService` sale, and the resolver/command gates).
-- [x] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded. Exactly one non-`original-*` JAR, `target/farmers-market-0.1.0.jar`. Embedded descriptor verified: `name`, `main`, `api-version: '26.1'`, fully-substituted `version: '0.1.0'`, the `market` command, all three permission nodes, `softdepend`, and `libraries`. **Shading review:** the JAR bundles nothing — `org/bukkit`, `io/papermc`, `org/sqlite`, `org/yaml`, and `org/junit` each return 0 entries, so no server API and no runtime-loaded library leaked in. **`0.2.0` re-inspected** `2026-07-28`: exactly one non-`original-*` JAR, `target/farmers-market-0.2.0.jar`; embedded descriptor reads `version: '0.2.0'`, the `market` usage string now names the M2 subcommands, `softdepend: [Floodgate]` and `libraries: org.xerial:sqlite-jdbc:3.53.2.0` unchanged; 43 own classes present, `org/bukkit`/`io/papermc`/`org/sqlite` still 0 entries — no server API or runtime library leaked in.
+- [x] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded. Exactly one non-`original-*` JAR, `target/farmers-market-0.1.0.jar`. Embedded descriptor verified: `name`, `main`, `api-version: '26.1'`, fully-substituted `version: '0.1.0'`, the `market` command, all three permission nodes, `softdepend`, and `libraries`. **Shading review:** the JAR bundles nothing — `org/bukkit`, `io/papermc`, `org/sqlite`, `org/yaml`, and `org/junit` each return 0 entries, so no server API and no runtime-loaded library leaked in. **`0.2.0` re-inspected** `2026-07-28`: exactly one non-`original-*` JAR, `target/farmers-market-0.2.0.jar`; embedded descriptor reads `version: '0.2.0'`, the `market` usage string now names the M2 subcommands, `softdepend: [Floodgate]` and `libraries: org.xerial:sqlite-jdbc:3.53.2.0` unchanged; 43 own classes present, `org/bukkit`/`io/papermc`/`org/sqlite` still 0 entries — no server API or runtime library leaked in. **`0.3.0` re-inspected** `2026-08-04`: exactly one non-`original-*` JAR, `target/farmers-market-0.3.0.jar` (135,570 bytes); embedded descriptor reads `version: '0.3.0'`, the `market` usage string now also names the commodity subcommands `bid | price | cancelbid`, `softdepend: [Floodgate]` and `libraries: org.xerial:sqlite-jdbc:3.53.2.0` unchanged; 55 own classes present, `org/bukkit`/`io/papermc`/`org/sqlite`/`org/yaml` all 0 entries — nothing leaked into the shade. 292/292 `mvn verify`.
 
 ### Test-strength discipline
 
@@ -437,6 +437,60 @@ The market's entire trade loop needs a player inventory, so it is unreachable he
 5. **Diamond sales tax split, live.** After a real sale, confirm total diamond supply fell by exactly the burn and the remainder credited the nil-UUID community pot (`/market pot` should then render a non-zero balance).
 6. **The post-commit decode-failure hold path.** The whole-branch-review fix: if `BukkitItemCodec.decode` throws after commit (e.g. a server upgrade migrated the bytes), confirm the raw bytes are held for `claim` with a WARNING reconciliation line and no money is double-paid — reachable only with a real item and a decode fault.
 7. **Async listing expiry actually expiring a listing** (the sweep registered but had nothing to expire in a fresh, listing-less DB).
+
+### 7a — 0.3.0 commodity exchange re-run: PASSED `2026-08-04`
+
+The M2 Part 2 commodity exchange (`0.3.0`) adds Migration 3 and the resting-bid engine; this re-run gates its
+release. Disposable fresh-volume Legendary stack, slot 0, project `xpfarm-plugin-test-farmers-market-19444cd0`.
+Booted from `target/farmers-market-0.3.0.jar` built at `main` `e7d5885` (292/292 `mvn verify`), verified, torn
+down; slot lease released cleanly (`down` exit 0). The rig's `up` self-verified all three preconditions: Paper
+logged its own `Done (17.393s)! For help`; the Java port answered a real handshake (`Paper 26.1.2 | protocol
+775`); RCON `plugins` listed **four plugins all green** — `FarmersMarket`, `floodgate`, `Geyser-Spigot`,
+`ViaVersion`.
+
+**Enable path + Migration 3 on real SQLite — the new-in-0.3.0 runtime-uncertain surface.**
+`[SpigotLibraryLoader] Loaded library .../sqlite-jdbc-3.53.2.0.jar` → `Loading server plugin FarmersMarket
+v0.3.0` → `database ready at plugins/FarmersMarket/market.db (schema version 3)` → `FarmersMarket enabled.` The
+**`schema version 3`** line is the evidence that mattered: Migration 3's DDL — the `commodity_offers` resting-bid
+table with its three `CHECK` constraints and two indexes — executed without error against a real SQLite file
+under the **runtime-loaded** `sqlite-jdbc 3.53.2.0` driver (not the test classpath), applied sequentially on top
+of Migrations 1 and 2. `FarmersMarket enabled.` printing means `onEnable` ran to completion, so the new
+`validateItemKeys` config check and the async expiry-sweep both registered without throwing. (On a fresh volume
+the DB reaches v3 by applying all three migrations; the true **v2→v3 in-place upgrade preserving existing
+accounts and listings** happens when `0.3.0` deploys onto the live `0.2.0` prod DB — carried to gate 12 below.)
+
+**Command surface over RCON.** `/market bogus` → the usage string now names exactly the full subcommand set
+including the new `bid | price | cancelbid`. Every player-only commodity verb refused the console cleanly with no
+`ClassCastException`: `bid iron_ingot 64 3` and `cancelbid 1` each replied `'<sub>' needs a player with an
+inventory, so the console cannot run it. Console can run /market reload.` `/market reload` → `Farmers Market
+configuration reloaded.` (re-runs `validateItemKeys` with no warning — the default `buyback-floors`/`buy-limits`
+maps are empty, so there are no keys to validate). The console-allowed `price iron_ingot` was accepted and
+produced **no RCON output and no exception** — like `browse`/`pot`, it replies from an async DB-read callback
+that fires after the command method returns and the RCON connection has closed; its rendered output is a gate-12
+client concern, not a defect.
+
+**Clean run.** No `org.xpfarm` stack trace, no `SEVERE`, no exception, and no config warning anywhere in the run.
+
+#### What the 0.3.0 re-run could NOT reach — carried to the gate 12 play-test
+
+The commodity trade loop needs a real player inventory and, for the upgrade, the live prod DB — both unreachable
+headlessly. Named here so `minecraft-plugin-handoff` carries them as real obligations (Carmelo runs this live in
+production, per the test-in-production stance):
+
+1. **Migration 3 v2→v3 in-place, preserving data.** Deploy `0.3.0` onto the live `0.2.0` `market.db`; confirm the
+   schema-version line reads 3 and existing accounts + `listings` + `trades` survive untouched.
+2. **`/market bid` escrows diamonds and charges the XP fee.** A resting bid debits the buyer's balance into the
+   offer row and deducts real XP (the fee is charged only after the escrow write); the bid shows in `/market mine`.
+3. **`/market price <material>`** renders the best bid and the pot-funded floor as legible Bedrock chat text.
+4. **`/market sell` fills best-bid-first then floor.** A second player's commodity sell fills the resting bid
+   (byte-identical item delivered to the buyer's `/market claim`), taxes the seller 7% (supply falls by exactly the
+   burn, pot credited), and dumps the remainder to the floor (`COMMUNITY_POT → seller`, untaxed; `/market pot` drops).
+5. **Buy-limit fill-to-cap-then-cancel.** With a configured cap, a large sell fills a bidder to the cap and then
+   cancels + refunds the bid's remainder.
+6. **Empty-book, no-floor sell** returns the whole stack to the seller unsold.
+7. **`validateItemKeys` fires loudly** on a deliberately mis-cased `buy-limits`/`buyback-floors` config key (the
+   whole-branch-review fix) — reachable only with a populated config; unexercised here because the default maps are
+   empty.
 
 ### 7b — full-roster matrix
 
