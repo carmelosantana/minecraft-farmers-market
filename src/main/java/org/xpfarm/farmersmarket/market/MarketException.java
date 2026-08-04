@@ -58,6 +58,9 @@ public final class MarketException extends RuntimeException {
         /** A commodity listing was attempted before the commodity market is open. */
         COMMODITY_NOT_YET,
 
+        /** A bid or sell names a material that is not a fungible commodity. */
+        NOT_A_COMMODITY,
+
         /**
          * Storage failed, and the failure provably happened <b>before any write was attempted</b> --
          * so the operation is a definite refusal, not an unknown outcome. Set only where that

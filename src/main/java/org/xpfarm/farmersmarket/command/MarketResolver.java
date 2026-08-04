@@ -519,6 +519,7 @@ public final class MarketResolver {
             case TOO_MANY_LISTINGS -> "You have too many listings up. Cancel or sell one first.";
             case COMMODITY_NOT_YET -> "Only unique items -- enchanted, renamed, damaged, or "
                     + "custom -- can be listed right now. Bulk trading is coming soon.";
+            case NOT_A_COMMODITY -> "That is not a tradable commodity.";
             // Same wording as the ledger's NOTHING_WRITTEN, and for the same reason: the market
             // sets it only when it knows the write never started, so the player is owed a definite
             // "nothing changed" rather than the go-and-check uncertainty message.

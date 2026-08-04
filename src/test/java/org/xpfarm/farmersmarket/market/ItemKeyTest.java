@@ -34,6 +34,23 @@ class ItemKeyTest {
     }
 
     @Test
+    void identicalBytesHashIdenticallyForCommodity() {
+        byte[] a = {1, 2, 3, 4};
+        assertEquals(ItemKey.forCommodity(a), ItemKey.forCommodity(new byte[] {1, 2, 3, 4}));
+    }
+
+    @Test
+    void aCommodityKeyIsMarkedAsOne() {
+        assertTrue(ItemKey.forCommodity(new byte[] {9}).startsWith("c:"));
+    }
+
+    @Test
+    void aCommodityKeyNeverCollidesWithAUniqueKey() {
+        byte[] x = {1, 2, 3};
+        assertNotEquals(ItemKey.forCommodity(x), ItemKey.forUnique(x));
+    }
+
+    @Test
     void theHashIsStableAcrossRuns() {
         // Pinned so a switch of hash algorithm is a visible, deliberate change, never an accident:
         // stored item_keys in a live database would otherwise silently stop matching.
