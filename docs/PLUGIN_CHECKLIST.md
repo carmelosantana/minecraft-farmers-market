@@ -567,13 +567,17 @@ each running its own gates 4-7a and its own release. This was decided at gate 4 
 measured the single-plan build at 3-4x the largest existing plugin in the ecosystem (Timber Blast,
 7k lines / 56 files) and the writing-plans scope check called for splitting it.
 
+M2 was split into two shippable parts at plan time (unique market, then commodity exchange), so it
+spans two minor versions — which shifts M3–M5's version labels by one from the original numbering.
+
 | Milestone | Scope | State |
 |---|---|---|
-| **M1** `0.1.0` | config, storage, identity, ledger, `/market` balance/deposit/withdraw/reload | **complete** — gates 4, 5, 6, 7a passed |
-| M2 `0.2.0` | listings, item identity, commodity matching, escrow, fees/tax, the immutable trade log | not started |
-| M3 `0.3.0` | cross-platform UI — Java chest GUI, Bedrock Cumulus forms | not started |
-| M4 `0.4.0` | vendors, `TextDisplay` labels, stalls, sealed-bid rent | not started |
-| M5 `0.5.0` | price history, basket index, map-item charts | not started |
+| **M1** `0.1.0` | config, storage, identity, ledger, `/market` balance/deposit/withdraw/reload | **complete** — gates 4–10 passed; released, updater-enrolled |
+| **M2 Part 1** `0.2.0` | unique-item market: listings, item identity, escrow, fees/tax, the immutable trade log | **complete** — released `2026-07-28`; gate 7a passed, updater-enrolled |
+| **M2 Part 2** `0.3.0` | commodity exchange: buy-side order book, resting bids, priceless market-sell, pot-funded floor, buy limits | **complete** — released `2026-08-04`; gate 7a passed, updater re-verified |
+| M3 (`0.4.0`) | cross-platform UI — Java chest GUI, Bedrock Cumulus forms | not started |
+| M4 (`0.5.0`) | vendors, `TextDisplay` labels, stalls, sealed-bid rent | not started |
+| M5 (`0.6.0`) | price history, basket index, map-item charts | not started |
 
 The second reason for the split matters more than the size one: **five of the design's decisions
 are unverified assumptions about Geyser behaviour** (§1 Known limitations). A single-plan build
