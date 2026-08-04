@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -43,6 +44,8 @@ import org.xpfarm.farmersmarket.ledger.ExperienceMath;
 import org.xpfarm.farmersmarket.ledger.Ledger;
 import org.xpfarm.farmersmarket.ledger.LedgerException;
 import org.xpfarm.farmersmarket.market.BukkitItemCodec;
+import org.xpfarm.farmersmarket.market.CommodityOfferRow;
+import org.xpfarm.farmersmarket.market.CommoditySpec;
 import org.xpfarm.farmersmarket.market.ItemClass;
 import org.xpfarm.farmersmarket.market.ListedItem;
 import org.xpfarm.farmersmarket.market.ListingRow;
@@ -156,7 +159,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
             case DEPOSIT_ALL -> deposit((Player) sender, DEPOSIT_EVERYTHING);
             case DEPOSIT_AMOUNT -> deposit((Player) sender, resolved.diamonds());
             case WITHDRAW_AMOUNT -> withdraw((Player) sender, resolved.diamonds());
-            case SELL -> sell((Player) sender, resolved.priceDust());
+            case SELL -> sell((Player) sender, resolved.priceDust(), resolved.quantity());
             case BROWSE -> browse(sender, resolved.page());
             case INFO -> info(sender, resolved.listingId());
             case BUY -> buy((Player) sender, resolved.listingId());
@@ -164,6 +167,10 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
             case MINE -> mine((Player) sender);
             case CLAIM -> claim((Player) sender);
             case POT -> pot(sender);
+            case BID -> bid((Player) sender, resolved.material(), resolved.quantity(),
+                    Diamonds.ofDust(resolved.priceDust()));
+            case PRICE -> price(sender, resolved.material());
+            case CANCELBID -> cancelbid((Player) sender, resolved.listingId());
             case RELOAD -> reload(sender);
             default -> error(sender, MarketResolver.usage());
         }
@@ -451,7 +458,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
      * <em>after</em> the escrow write succeeds, so a refused listing costs neither the item nor the
      * fee, and a successful one costs both.
      */
-    private void sell(Player player, long priceDust) {
+    private void sell(Player player, long priceDust, int qty) {
         UUID id = player.getUniqueId();
         ItemStack inHand = player.getInventory().getItemInMainHand();
         if (inHand == null || inHand.getType().isAir() || inHand.getAmount() <= 0) {
@@ -461,8 +468,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
 
         ListedItem item = BukkitItemCodec.encode(inHand);
         if (item.itemClass() == ItemClass.COMMODITY) {
-            // Nothing has been removed or charged.
-            error(player, MarketResolver.messageFor(MarketException.Reason.NOT_A_COMMODITY));
+            sellCommodity(player, id, inHand, qty);
             return;
         }
 
@@ -517,6 +523,220 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
                             "Your item was taken out of your hand and may or may not be listed; "
                                     + "do not sell another copy until an admin checks.");
                 });
+    }
+
+    /**
+     * Sells a held bulk commodity into the resting bid book, best-first, and dumps whatever the
+     * book cannot absorb to the community-pot floor.
+     *
+     * <p><b>Never take without giving, never give without taking.</b> The sold portion leaves the
+     * hand up front as escrow, cloned first so a refusal returns precisely what was taken. On a
+     * definite {@link MarketException} refusal the whole removed clone goes back; on an unknown
+     * outcome nothing is returned, because the items may have sold and returning them would dupe --
+     * the same policy the unique {@code sell} and {@code buy} paths follow. A commodity sell carries
+     * no XP fee: only a resting bid costs XP, and the seller pays only the sales tax that
+     * {@link MarketService#marketSell} handles inside the transaction.
+     */
+    private void sellCommodity(Player player, UUID id, ItemStack inHand, int qty) {
+        if (qty <= 0) {
+            // The sell argument did not read as a whole positive quantity (it was fractional or
+            // zero). Nothing has been removed.
+            error(player, "Commodity quantities are whole numbers, e.g. /market sell 64.");
+            return;
+        }
+        FmConfig cfg = config.get();
+        CommoditySpec spec = BukkitItemCodec.commodityOf(inHand);
+        int sellQty = Math.min(qty, inHand.getAmount());
+        long floorDust = floorDustFor(inHand.getType(), cfg);
+        int buyLimitCap = cfg.buyLimits().getOrDefault(inHand.getType().name(), -1);
+
+        // Take the sold portion out of the hand before the sale runs, cloning it first so a refusal
+        // hands back exactly what was removed. Listing it first would let a logged-off player keep a
+        // copy the escrow also claims.
+        ItemStack removed = inHand.clone();
+        removed.setAmount(sellQty);
+        int leftInHand = inHand.getAmount() - sellQty;
+        if (leftInHand <= 0) {
+            player.getInventory().setItemInMainHand(null);
+        } else {
+            inHand.setAmount(leftInHand);
+        }
+        Location where = player.getLocation();
+
+        onMainThread(market.marketSell(id, spec, sellQty, cfg.salesTaxPercent(), cfg.taxBurnShare(),
+                floorDust, cfg.buyLimitEnabled(), buyLimitCap,
+                cfg.buyLimitWindowHours() * 3_600_000L, System.currentTimeMillis()), id,
+                "selling " + sellQty + "x " + spec.displayName(), (result, failure) -> {
+                    if (failure == null) {
+                        // Whatever the book and floor could not absorb comes straight back. An
+                        // unsold count never exceeds a single hand stack, so one stack is safe.
+                        if (result.unsold() > 0) {
+                            ItemStack ret = BukkitItemCodec.decode(spec.oneItemBytes());
+                            ret.setAmount(result.unsold());
+                            giveOrDrop(id, where, ret);
+                        }
+                        message(id, text("Sold " + result.sold() + "x " + spec.displayName()
+                                + " for " + result.proceeds().format() + " diamonds"
+                                + (result.unsold() > 0
+                                        ? " (" + result.unsold() + " returned — no buyers)" : "")
+                                + ".", NamedTextColor.GREEN));
+                        return;
+                    }
+                    if (failure instanceof MarketException refused) {
+                        // A refusal is definite: nothing was written, so the removed items are safe
+                        // to return in full.
+                        giveOrDrop(id, where, removed);
+                        message(id, text(MarketResolver.messageFor(refused.reason()),
+                                NamedTextColor.RED));
+                        return;
+                    }
+                    // Unknown, not failed. The items left the hand and may or may not have sold;
+                    // returning them could dupe, so they are not returned. Same policy as buy/sell.
+                    reportUncertain(id, "selling " + sellQty + "x " + spec.displayName(), failure,
+                            "Your items were taken from your hand and may or may not have sold; "
+                                    + "do not sell more until an admin checks.");
+                });
+    }
+
+    // ---- bid / price / cancelbid ------------------------------------------------------
+
+    /**
+     * Places a standing buy order for {@code qty} units of a material at {@code priceEach}, escrowing
+     * the diamonds and charging an XP anti-spam fee.
+     *
+     * <p><b>Nothing is charged until the escrow write succeeds.</b> A non-commodity material, an
+     * overflowing bid value, and an unaffordable fee all stop before {@link MarketService#placeBid}
+     * runs, with no diamonds escrowed and no XP spent. The XP fee is deducted <em>after</em> the
+     * escrow commits, so a refused bid costs neither the escrow nor the fee, exactly as the unique
+     * {@code sell} listing fee is charged.
+     */
+    private void bid(Player player, String materialName, int qty, Diamonds priceEach) {
+        UUID id = player.getUniqueId();
+        Optional<CommoditySpec> maybe = BukkitItemCodec.commoditySpecFor(materialName);
+        if (maybe.isEmpty()) {
+            error(player, MarketResolver.messageFor(MarketException.Reason.NOT_A_COMMODITY));
+            return;
+        }
+        CommoditySpec spec = maybe.get();
+        FmConfig cfg = config.get();
+
+        Diamonds bidValue;
+        int fee;
+        try {
+            // Diamonds.times refuses an overflow with a LedgerException; listingFeeXp refuses a fee
+            // too large for an int with an ArithmeticException. Both are absurd-input guards, and
+            // both stop the bid before anything is escrowed or charged.
+            bidValue = priceEach.times(qty);
+            fee = MarketMath.listingFeeXp(bidValue, cfg.listingFeePercent(), cfg.xpPerDiamond());
+        } catch (LedgerException | ArithmeticException tooBig) {
+            error(player, "That bid is too large.");
+            return;
+        }
+        int have = experiencePoints(player);
+        if (have < fee) {
+            error(player, "You need " + fee + " XP to place that bid, and you have " + have + ".");
+            return;
+        }
+
+        onMainThread(market.placeBid(id, spec.materialKey(), qty, priceEach, fee,
+                System.currentTimeMillis()), id, "placing a bid for " + qty + "x "
+                        + spec.displayName(), (offerId, failure) -> {
+                    if (failure == null) {
+                        // Escrow committed: now, and only now, charge the fee. Re-resolve the player
+                        // -- if they logged off in the window, the bid is safely placed and the fee
+                        // is simply not charged, which is the non-dangerous direction.
+                        Player again = plugin.getServer().getPlayer(id);
+                        if (again != null) {
+                            again.giveExp(-fee);
+                        }
+                        message(id, text("Bid placed: " + qty + "x " + spec.displayName() + " at "
+                                + priceEach.format() + " each. Escrowed " + bidValue.format()
+                                + " diamonds, fee " + fee + " XP.", NamedTextColor.GREEN));
+                        return;
+                    }
+                    if (failure instanceof MarketException refused) {
+                        // A refusal is definite: nothing was escrowed and no fee was charged.
+                        message(id, text(MarketResolver.messageFor(refused.reason()),
+                                NamedTextColor.RED));
+                        return;
+                    }
+                    reportUncertain(id, "placing a bid for " + qty + "x " + spec.displayName(),
+                            failure, "Your diamonds may or may not have been escrowed; check "
+                                    + "/market balance before trying again.");
+                });
+    }
+
+    /**
+     * Quotes the best resting bid and the buy-back floor for a material. Read-only and console-safe:
+     * it moves nothing, so it never escrows, charges, or compensates.
+     */
+    private void price(CommandSender sender, String materialName) {
+        Optional<CommoditySpec> maybe = BukkitItemCodec.commoditySpecFor(materialName);
+        if (maybe.isEmpty()) {
+            error(sender, MarketResolver.messageFor(MarketException.Reason.NOT_A_COMMODITY));
+            return;
+        }
+        CommoditySpec spec = maybe.get();
+        Material material = Material.matchMaterial(materialName);
+        long floorDust = material == null ? 0L : floorDustFor(material, config.get());
+        onMainThreadForSender(market.bestBidDust(spec.materialKey()), sender, (bestBid, failure) -> {
+            if (failure != null) {
+                sender.sendMessage(text("Could not read the market just now.", NamedTextColor.RED));
+                return;
+            }
+            String bidLine = bestBid.isPresent()
+                    ? "Best bid: " + Diamonds.ofDust(bestBid.get()).format() + " each"
+                    : "No bids.";
+            String floorLine = floorDust > 0
+                    ? " Floor: " + Diamonds.ofDust(floorDust).format() + " each" : " No floor.";
+            sender.sendMessage(text(spec.displayName() + " — " + bidLine + floorLine,
+                    NamedTextColor.YELLOW));
+        });
+    }
+
+    /**
+     * Cancels the player's own resting bid and refunds whatever escrow it still holds. The XP fee
+     * paid to place the bid is not refunded -- it was an anti-spam cost, not escrow.
+     */
+    private void cancelbid(Player player, long offerId) {
+        UUID id = player.getUniqueId();
+        onMainThread(market.cancelBid(id, offerId, System.currentTimeMillis()), id,
+                "cancelling bid " + offerId, (ignored, failure) -> {
+                    if (failure == null) {
+                        message(id, text("Bid " + offerId + " cancelled; remaining escrow refunded.",
+                                NamedTextColor.GREEN));
+                        return;
+                    }
+                    if (failure instanceof MarketException refused) {
+                        message(id, text(MarketResolver.messageFor(refused.reason()),
+                                NamedTextColor.RED));
+                        return;
+                    }
+                    reportUncertain(id, "cancelling bid " + offerId, failure,
+                            "Your bid may or may not have been cancelled; check /market mine before "
+                                    + "trying again.");
+                });
+    }
+
+    /**
+     * The buy-back floor for {@code m} in dust, or {@code 0} when the faucet is disabled or the
+     * material has no configured floor. The one permitted diamond-{@code double}-to-dust conversion
+     * in the command layer, done exactly once here; every downstream use is integer dust.
+     *
+     * <p>Keyed by {@link Material#name()} -- {@code IRON_INGOT} -- because that is the convention
+     * {@code liquidity.buyback-floors} and {@code limits.buy-limits} use in {@code config.yml}
+     * (see {@code FmConfigTest}). The namespaced {@code spec.materialKey()} ({@code minecraft:iron_ingot})
+     * is a different key space the offer book uses internally and must not be used for config lookup.
+     */
+    private long floorDustFor(Material m, FmConfig cfg) {
+        if (!cfg.buybackEnabled()) {
+            return 0L;
+        }
+        Double floor = cfg.buybackFloors().get(m.name());
+        if (floor == null) {
+            return 0L;
+        }
+        return Math.round(floor * Diamonds.DUST_PER_DIAMOND);
     }
 
     // ---- buy --------------------------------------------------------------------------
@@ -675,7 +895,7 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
         });
     }
 
-    /** The player's own still-active listings -- the ones they can cancel. */
+    /** The player's own still-active listings and resting bids -- the ones they can cancel. */
     private void mine(Player player) {
         UUID id = player.getUniqueId();
         onMainThreadForSender(market.myListings(id), player, (rows, failure) -> {
@@ -685,15 +905,47 @@ public final class MarketCommand implements CommandExecutor, TabCompleter {
             }
             if (rows.isEmpty()) {
                 player.sendMessage(text("You have no active listings.", NamedTextColor.AQUA));
+            } else {
+                player.sendMessage(text("Your active listings:", NamedTextColor.AQUA));
+                for (ListingRow row : rows) {
+                    player.sendMessage(text("#" + row.id() + "  " + row.summary() + "  -- "
+                            + Diamonds.ofDust(row.priceDust()).format() + " diamonds",
+                            NamedTextColor.YELLOW));
+                }
+                player.sendMessage(text("Cancel one with /market cancel <number>.",
+                        NamedTextColor.GRAY));
+            }
+            // Chain the bid book onto the same view: a player's resting buy orders are theirs to
+            // see and cancel just as their listings are.
+            appendMyBids(player);
+        });
+    }
+
+    /**
+     * Appends the player's still-active resting bids to their {@code /market mine} view. Runs after
+     * the listings are printed, on the same read-only seam. A bid read that fails says so softly
+     * rather than swallowing the listings already shown; no bids at all prints nothing extra.
+     */
+    private void appendMyBids(Player player) {
+        UUID id = player.getUniqueId();
+        onMainThreadForSender(market.myBids(id), player, (bids, failure) -> {
+            if (failure != null) {
+                player.sendMessage(text("Could not read your active bids just now.",
+                        NamedTextColor.RED));
                 return;
             }
-            player.sendMessage(text("Your active listings:", NamedTextColor.AQUA));
-            for (ListingRow row : rows) {
-                player.sendMessage(text("#" + row.id() + "  " + row.summary() + "  -- "
-                        + Diamonds.ofDust(row.priceDust()).format() + " diamonds",
+            if (bids.isEmpty()) {
+                return;
+            }
+            player.sendMessage(text("Your active bids:", NamedTextColor.AQUA));
+            for (CommodityOfferRow bid : bids) {
+                player.sendMessage(text("#" + bid.id() + "  " + bid.qtyRemaining() + "x "
+                        + bid.materialKey() + " @ "
+                        + Diamonds.ofDust(bid.priceEachDust()).format() + " each",
                         NamedTextColor.YELLOW));
             }
-            player.sendMessage(text("Cancel one with /market cancel <number>.", NamedTextColor.GRAY));
+            player.sendMessage(text("Cancel one with /market cancelbid <number>.",
+                    NamedTextColor.GRAY));
         });
     }
 
