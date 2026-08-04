@@ -101,6 +101,15 @@ public final class MarketResolver {
         /** {@code /market pot}, a read-only view of the community pot the console may run. */
         POT("pot", USE_PERMISSION, false),
 
+        /** {@code /market bid <material> <qty> <price-each>}, a standing buy order; needs a player. */
+        BID("bid", USE_PERMISSION, true),
+
+        /** {@code /market price <material>}, a read-only commodity quote the console may run. */
+        PRICE("price", USE_PERMISSION, false),
+
+        /** {@code /market cancelbid <id>}, which returns escrowed diamonds and so needs a player. */
+        CANCELBID("cancelbid", USE_PERMISSION, true),
+
         /** {@code /market reload}, deliberately runnable from the console over RCON. */
         RELOAD("reload", RELOAD_PERMISSION, false);
 
@@ -160,6 +169,15 @@ public final class MarketResolver {
         /** A browse page that is not a positive whole number. */
         BAD_PAGE,
 
+        /** A commodity subcommand that names no material to trade. */
+        MISSING_MATERIAL,
+
+        /** A bid with no price-each, which has no sensible default. */
+        MISSING_PRICE,
+
+        /** A bid price-each that is not a positive, representable number of diamonds. */
+        BAD_PRICE,
+
         /** Show the sender's balance and experience. */
         BALANCE,
 
@@ -196,6 +214,16 @@ public final class MarketResolver {
         /** Show the community pot. */
         POT,
 
+        /** Place a standing buy order for {@link Resolution#quantity()} of
+         * {@link Resolution#material()} at {@link Resolution#priceDust()} dust each. */
+        BID,
+
+        /** Quote the market price of {@link Resolution#material()}. */
+        PRICE,
+
+        /** Cancel the standing buy order with {@link Resolution#listingId()}. */
+        CANCELBID,
+
         /** Re-read {@code config.yml}. */
         RELOAD;
 
@@ -204,7 +232,8 @@ public final class MarketResolver {
             return this == UNKNOWN_SUBCOMMAND || this == TOO_MANY_ARGUMENTS
                     || this == NO_PERMISSION || this == CONSOLE_NEEDS_PLAYER
                     || this == MISSING_AMOUNT || this == BAD_AMOUNT
-                    || this == MISSING_ID || this == BAD_ID || this == BAD_PAGE;
+                    || this == MISSING_ID || this == BAD_ID || this == BAD_PAGE
+                    || this == MISSING_MATERIAL || this == MISSING_PRICE || this == BAD_PRICE;
         }
     }
 
@@ -222,28 +251,46 @@ public final class MarketResolver {
      * @param priceDust the sell price in dust, for {@link Outcome#SELL}; {@code 0} otherwise. A
      *                  sell price may be fractional, so this is carried as dust rather than as a
      *                  whole-diamond count
-     * @param listingId the listing id, for {@link Outcome#INFO}, {@link Outcome#BUY}, and
-     *                  {@link Outcome#CANCEL}; {@code 0} otherwise
+     * @param listingId the listing id, for {@link Outcome#INFO}, {@link Outcome#BUY},
+     *                  {@link Outcome#CANCEL}, and {@link Outcome#CANCELBID}; {@code 0} otherwise
      * @param page      the one-based page, for {@link Outcome#BROWSE}; {@code 0} otherwise
+     * @param material  the raw material token, for {@link Outcome#BID} and {@link Outcome#PRICE};
+     *                  {@code null} otherwise. Left unresolved here: mapping a token to a real
+     *                  material needs the Bukkit registry, which this class does not import
+     * @param quantity  the number of units, for {@link Outcome#BID} and, as the commodity
+     *                  interpretation of the argument, {@link Outcome#SELL}; {@code 0} otherwise.
+     *                  A {@code SELL} carries both this and {@link #priceDust()} so the command can
+     *                  pick by the held item's class
      * @param message   the message to show, for every {@linkplain Outcome#isError() error}
      *                  outcome and {@code null} otherwise
      */
     public record Resolution(Outcome outcome, long diamonds, long priceDust, long listingId,
-                             int page, String message) {
+                             int page, String material, int quantity, String message) {
+
+        /**
+         * A resolution that carries no commodity material or quantity, for every Part 1 path
+         * (balance, deposit, withdraw, the unique-item sell, browse, info, buy, cancel, and the
+         * errors) that predates the commodity subcommands. Delegating here keeps those call sites
+         * compiling unchanged.
+         */
+        public Resolution(Outcome outcome, long diamonds, long priceDust, long listingId,
+                          int page, String message) {
+            this(outcome, diamonds, priceDust, listingId, page, null, 0, message);
+        }
 
         /**
          * A resolution that carries only a diamond count or a message, for the balance, deposit,
          * withdraw, reload, and every-error path that predates the market subcommands.
          */
         public Resolution(Outcome outcome, long diamonds, String message) {
-            this(outcome, diamonds, 0L, 0L, 0, message);
+            this(outcome, diamonds, 0L, 0L, 0, null, 0, message);
         }
     }
 
     /** The usage line, naming the subcommands that exist. */
     public static String usage() {
         return "Usage: /market [balance | deposit | withdraw | sell | browse | info | buy "
-                + "| cancel | mine | claim | pot | reload]";
+                + "| cancel | mine | claim | pot | bid | price | cancelbid | reload]";
     }
 
     /** Resolves a typed token to a subcommand, case-insensitively. */
@@ -317,6 +364,9 @@ public final class MarketResolver {
             case POT -> tokens.length > 1
                     ? tooMany(sub)
                     : new Resolution(Outcome.POT, 0L, null);
+            case BID -> resolveBid(tokens);
+            case PRICE -> resolvePrice(tokens);
+            case CANCELBID -> resolveId(tokens, Sub.CANCELBID, Outcome.CANCELBID);
             case RELOAD -> tokens.length > 1
                     ? tooMany(sub)
                     : new Resolution(Outcome.RELOAD, 0L, null);
@@ -353,7 +403,100 @@ public final class MarketResolver {
         if (tokens.length == 1) {
             return error(Outcome.MISSING_AMOUNT, "For how much? Try /market sell 10.");
         }
-        return price(tokens[1]);
+        // A sell argument carries two readings at once, and which one the command uses is decided
+        // later by the held item's class: a unique item reads it as a fractional price (dust), a
+        // bulk commodity reads it as a whole quantity. The fractional price is authoritative here,
+        // so a bad price is still an error; the quantity is a best-effort second reading that is
+        // simply zero when the argument is not a whole number, never an error of its own.
+        Resolution priced = price(tokens[1]);
+        if (priced.outcome().isError()) {
+            return priced;
+        }
+        return new Resolution(Outcome.SELL, 0L, priced.priceDust(), 0L, 0,
+                null, wholeQuantityOrZero(tokens[1]), null);
+    }
+
+    /**
+     * Resolves {@code /market bid <material> <qty> <price-each>}.
+     *
+     * <p>The three pieces are required left to right and refused in that order, so a player is told
+     * about the first thing missing rather than the last: a bare {@code bid} is missing a material,
+     * {@code bid iron_ingot} is missing a quantity, {@code bid iron_ingot 64} is missing a price.
+     * The material is left as a raw token -- turning it into a real material needs the Bukkit
+     * registry, which this class does not import -- while the quantity is a whole count of items
+     * (there is no half an ingot) and the price-each is fractional, parsed by the same
+     * {@link Diamonds#parse} grammar every other price and amount goes through.
+     */
+    private static Resolution resolveBid(String[] tokens) {
+        if (tokens.length > 4) {
+            return tooMany(Sub.BID);
+        }
+        if (tokens.length < 2) {
+            return error(Outcome.MISSING_MATERIAL,
+                    "Which item? Name a material, like /market bid iron_ingot 64 1.");
+        }
+        String material = tokens[1];
+        if (tokens.length < 3) {
+            return error(Outcome.MISSING_AMOUNT,
+                    "How many? Try /market bid " + material + " 64 1.");
+        }
+        int quantity;
+        try {
+            quantity = Integer.parseInt(tokens[2].trim());
+        } catch (NumberFormatException e) {
+            return error(Outcome.BAD_AMOUNT, "A quantity is a whole number, like 64.");
+        }
+        if (quantity <= 0) {
+            return error(Outcome.BAD_AMOUNT, "A quantity is a whole number, like 64.");
+        }
+        if (tokens.length < 4) {
+            return error(Outcome.MISSING_PRICE,
+                    "For how much each? Try /market bid " + material + " " + quantity + " 1.");
+        }
+        long priceDust;
+        try {
+            priceDust = Diamonds.parse(tokens[3]).dust();
+        } catch (LedgerException e) {
+            return error(Outcome.BAD_PRICE, messageFor(e.reason(), null));
+        }
+        if (priceDust <= 0L) {
+            return error(Outcome.BAD_PRICE, "A price must be more than zero.");
+        }
+        return new Resolution(Outcome.BID, 0L, priceDust, 0L, 0, material, quantity, null);
+    }
+
+    /**
+     * Resolves {@code /market price <material>}, a read-only quote.
+     *
+     * <p>Only the material is needed, and it is left as a raw token for the same reason the bid's
+     * is: naming a real material is the command layer's job, not the resolver's.
+     */
+    private static Resolution resolvePrice(String[] tokens) {
+        if (tokens.length > 2) {
+            return tooMany(Sub.PRICE);
+        }
+        if (tokens.length < 2) {
+            return error(Outcome.MISSING_MATERIAL,
+                    "Which item? Name a material, like /market price iron_ingot.");
+        }
+        return new Resolution(Outcome.PRICE, 0L, 0L, 0L, 0, tokens[1], 0, null);
+    }
+
+    /**
+     * The whole-number quantity a sell argument carries as its commodity reading, or {@code 0}.
+     *
+     * <p>This never fails: a fractional or otherwise non-integer argument (a real price like
+     * {@code 0.5}) is not a quantity, so it reads as zero units rather than as an error. The price
+     * reading in {@link #price} is the one that can refuse the argument; this is a second, optional
+     * reading the command uses only when the held item is a bulk commodity.
+     */
+    private static int wholeQuantityOrZero(String raw) {
+        try {
+            int quantity = Integer.parseInt(raw.trim());
+            return quantity > 0 ? quantity : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     private static Resolution resolveBrowse(String[] tokens) {
@@ -517,7 +660,8 @@ public final class MarketResolver {
                     "You do not have enough diamonds. Deposit some with /market deposit.";
             case NOT_YOUR_LISTING -> "That is not your listing.";
             case TOO_MANY_LISTINGS -> "You have too many listings up. Cancel or sell one first.";
-            case NOT_A_COMMODITY -> "That is not a tradable commodity.";
+            case NOT_A_COMMODITY -> "That item is not a bulk commodity — list it on the board "
+                    + "with /market sell <price> instead.";
             // Same wording as the ledger's NOTHING_WRITTEN, and for the same reason: the market
             // sets it only when it knows the write never started, so the player is owed a definite
             // "nothing changed" rather than the go-and-check uncertainty message.
