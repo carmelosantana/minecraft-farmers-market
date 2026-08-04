@@ -261,6 +261,61 @@ class MarketDaoTest {
                 1_000L, 2_000L, ListingStatus.ACTIVE, null, null)));
     }
 
+    @Test
+    void insertAndFindActiveOfferRoundTrips() throws Exception {
+        UUID buyer = UUID.randomUUID();
+        long id = dao.insertOffer(new CommodityOfferRow(0L, buyer, "minecraft:iron_ingot",
+                64, 3000L, 192000L, 2, 100L, OfferStatus.ACTIVE));
+        CommodityOfferRow row = dao.findActiveOffer(id).orElseThrow();
+        assertEquals(buyer, row.buyer());
+        assertEquals(64, row.qtyRemaining());
+        assertEquals(3000L, row.priceEachDust());
+        assertEquals(192000L, row.escrowedDust());
+    }
+
+    @Test
+    void bestActiveBidsOrdersByPriceThenAge() throws Exception {
+        UUID a = UUID.randomUUID();
+        long older = dao.insertOffer(new CommodityOfferRow(0L, a, "k", 10, 5000L, 50000L, 1, 100L, OfferStatus.ACTIVE));
+        long higher = dao.insertOffer(new CommodityOfferRow(0L, a, "k", 10, 9000L, 90000L, 1, 200L, OfferStatus.ACTIVE));
+        long olderSamePrice = dao.insertOffer(new CommodityOfferRow(0L, a, "k", 10, 5000L, 50000L, 1, 50L, OfferStatus.ACTIVE));
+        List<CommodityOfferRow> bids = dao.bestActiveBids("k", 10);
+        assertEquals(higher, bids.get(0).id(), "highest price first");
+        assertEquals(olderSamePrice, bids.get(1).id(), "same price -> oldest (created_at 50) first");
+        assertEquals(older, bids.get(2).id());
+    }
+
+    @Test
+    void spendFromOfferDecrementsAndFillsAtZero() throws Exception {
+        long id = dao.insertOffer(new CommodityOfferRow(0L, UUID.randomUUID(), "k", 10, 1000L, 10000L, 0, 1L, OfferStatus.ACTIVE));
+        assertEquals(1, dao.spendFromOffer(id, 4, 4000L));
+        CommodityOfferRow after = dao.findActiveOffer(id).orElseThrow();
+        assertEquals(6, after.qtyRemaining());
+        assertEquals(6000L, after.escrowedDust());
+        assertEquals(1, dao.spendFromOffer(id, 6, 6000L));
+        assertTrue(dao.findActiveOffer(id).isEmpty(), "fully spent -> no longer ACTIVE");
+    }
+
+    @Test
+    void spendFromOfferOnNonActiveReturnsZero() throws Exception {
+        long id = dao.insertOffer(new CommodityOfferRow(0L, UUID.randomUUID(), "k", 5, 1000L, 5000L, 0, 1L, OfferStatus.ACTIVE));
+        assertEquals(1, dao.cancelOffer(id));
+        assertEquals(0, dao.spendFromOffer(id, 1, 1000L), "cancelled offer cannot be spent");
+    }
+
+    @Test
+    void buyLimitUsageSumsTradesInWindow() throws Exception {
+        UUID buyer = UUID.randomUUID();
+        UUID seller = UUID.randomUUID();
+        dao.insertTrade(new TradeRow(0L, 1000L, buyer, seller, ItemClass.COMMODITY, "ik", "k", 30,
+                30000L, 0L, 0L, 0L, 30000L, null));
+        dao.insertTrade(new TradeRow(0L, 2000L, buyer, seller, ItemClass.COMMODITY, "ik", "k", 20,
+                20000L, 0L, 0L, 0L, 20000L, null));
+        dao.insertTrade(new TradeRow(0L, 500L, buyer, seller, ItemClass.COMMODITY, "ik", "k", 99,
+                99000L, 0L, 0L, 0L, 99000L, null)); // before the window
+        assertEquals(50, dao.buyLimitUsage(buyer, "k", 1000L), "only happened_at >= 1000 counts");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static ListingRow activeListing(UUID seller) {

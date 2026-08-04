@@ -144,8 +144,37 @@ public final class Migrations {
             "CREATE INDEX IF NOT EXISTS idx_pending_owner ON pending_items(owner_uuid, claimed_at)"
     };
 
+    /**
+     * Migration 3: the commodity exchange's resting bids. Only buy offers rest (Part 2 is a
+     * buy-side-only book), so this is a single mutable table -- like {@code listings}, not
+     * append-only like {@code trades}. {@code escrowed_dust} holds the buyer's diamonds that were
+     * debited from their account at bid time and that a fill spends or a cancel refunds; the three
+     * CHECKs are the same fail-closed discipline as {@code accounts.diamonds_dust >= 0}.
+     */
+    private static final String[] MIGRATION_3 = {
+            """
+            CREATE TABLE IF NOT EXISTS commodity_offers (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                buyer_uuid        TEXT    NOT NULL,
+                material_key      TEXT    NOT NULL,
+                qty_remaining     INTEGER NOT NULL,
+                price_each_dust   INTEGER NOT NULL,
+                escrowed_dust     INTEGER NOT NULL,
+                xp_paid           INTEGER NOT NULL,
+                created_at        INTEGER NOT NULL,
+                status            TEXT    NOT NULL DEFAULT 'ACTIVE',
+                CHECK (qty_remaining >= 0),
+                CHECK (price_each_dust > 0),
+                CHECK (escrowed_dust >= 0)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_offers_active ON commodity_offers"
+                    + "(material_key, status, price_each_dust DESC, created_at ASC)",
+            "CREATE INDEX IF NOT EXISTS idx_offers_buyer ON commodity_offers(buyer_uuid, status)"
+    };
+
     /** Every migration this plugin has ever shipped, oldest first. Never mutate in place. */
-    private static final List<String[]> MIGRATIONS = List.<String[]>of(MIGRATION_1, MIGRATION_2);
+    private static final List<String[]> MIGRATIONS = List.<String[]>of(MIGRATION_1, MIGRATION_2, MIGRATION_3);
 
     private Migrations() {
     }
