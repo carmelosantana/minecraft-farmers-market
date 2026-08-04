@@ -85,10 +85,21 @@ fail-open, production volume never touched.
    remainder to `/market pot`); async listing expiry. Plus M1's still-open carries (Floodgate merge,
    the shutdown reconciliation line). Full list in checklist §7a "0.2.0 re-run could NOT reach".
 
-**Alternative next area: M2 Part 2 (commodity exchange)** — if you'd rather defer the 0.2.0 release
-and keep building: anonymous buy/sell offer matching, partial fills, rolling buy limits, the server
-buy-back floor. Builds on this spine (`item_class` and the config keys are already in place). Ships
-as `0.3.0`. A separate plan, not yet written.
+**M2 Part 2 (commodity exchange) — PLANNED, ready to execute (`0.3.0`).** Plan written and committed:
+`docs/superpowers/plans/2026-07-28-farmers-market-m2-part2-commodity-exchange.md`. Design settled in a
+2026-07-28 brainstorm and embedded in the plan as facts 1-10: a **buy-side-only order book** (buyers
+rest priced bids; sellers market-sell instantly against best bids then a **community-pot-funded floor**,
+untaxed), the **buyer** pays the 1% XP fee to rest a bid ("resting in the book costs XP"), 7% tax on
+player-to-player fills, rolling **buy limits enforced fill-to-cap-then-cancel**, escrow held in the
+offer row, offline delivery via `pending_items`. Six TDD tasks on the Part 1 spine — Migration 3
+(`commodity_offers`; the `trades` log already carries `material_key`+`amount`, so it is untouched),
+`CommodityMath`, `CommoditySpec` + codec material resolution, `MarketService` place/sell/cancel
+multi-fill, resolver (`bid`/`price`/`cancelbid` + sell dual-parse), command wiring.
+
+**Execute Part 2 with `/superpowers:subagent-driven-development` (opus 4.8 coder + reviewer)**, exactly
+as Part 1 was built. One risk the plan flags: Task 4 removes `COMMODITY_NOT_YET`, so Tasks 5-6 must land
+in the same review cycle or the build is briefly red at the Task 4 boundary. The 0.2.0 release chain
+(operator deploy + Carmelo's live play-test) is independent and can proceed in parallel.
 
 `main` is at **`26b2720`** (merge of `feat/m2-entry-conditions`), CI green, branch deleted.
 `v0.1.0` remains the released tag — the entry conditions are unreleased refactor work sitting on
