@@ -545,6 +545,16 @@ Gate 11 is operator-mediated — the agent prepares and verifies, the operator t
 these unticked with a note that the redeployment is pending the operator is an accurate resting
 state, not a failure.
 
+**`0.3.0` enrolled and ready for pickup `2026-08-04`.** Deploy readiness confirmed via `xpfarm-plugin-deploy`:
+the `v0.3.0` release is sound (non-prerelease, exactly `farmers-market-0.3.0.jar` + `SHA256SUMS.txt`, checksum
+OK); the `plugins.json` entry is on `origin/main`, unchanged, **unpinned** so it resolves the latest release
+(`0.3.0`), correct `destination`/anchored `asset_regex`; gate 10 complete. The production `plugin-updater` will
+install `farmers-market.jar` → `0.3.0` on its next server recreation. **Boxes stay unticked — no deploy evidence
+relayed yet.** When the operator recreates the stack, relay for the record: `plugin-updater` exit `0` and its
+`Farmers Market: installed v0.3.0` (or `already current`) line; Minecraft started after it; and — the
+0.3.0-specific check — the enable log reads `database ready at ... (schema version 3)` with existing accounts +
+`listings` + `trades` intact (the **v2→v3 in-place migration** against the live `0.2.0` `market.db`).
+
 - [ ] Full Dokploy redeployment/recreation was performed by the operator (not a container restart), and the recreation used is noted.
 - [ ] Operator-relayed evidence was verified: `plugin-updater` exit `0`, Minecraft started after it, each covered plugin's updater line, and clean enable lines for Paper/Geyser/Floodgate/ViaVersion and every covered plugin.
 - [ ] No production plugin hot reload was used.
