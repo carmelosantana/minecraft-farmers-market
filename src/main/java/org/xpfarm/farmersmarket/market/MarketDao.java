@@ -247,6 +247,166 @@ public final class MarketDao {
         }
     }
 
+    // -------------------------------------------------------- commodity_offers
+
+    /**
+     * Inserts {@code row} into {@code commodity_offers} and returns the id SQLite assigned it. The
+     * stored {@code status} is taken from {@link CommodityOfferRow#status()}.
+     *
+     * @param row the offer to insert; its {@code id} is ignored and replaced by the generated one
+     * @return the generated row id
+     * @throws SQLException if the write fails, including a {@code CHECK} violation
+     */
+    public long insertOffer(CommodityOfferRow row) throws SQLException {
+        String sql = "INSERT INTO commodity_offers"
+                + "(buyer_uuid, material_key, qty_remaining, price_each_dust, escrowed_dust, xp_paid, created_at, status)"
+                + " VALUES (?,?,?,?,?,?,?,?)";
+        try (PreparedStatement ps =
+                database.connection().prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setString(1, row.buyer().toString());
+            ps.setString(2, row.materialKey());
+            ps.setInt(3, row.qtyRemaining());
+            ps.setLong(4, row.priceEachDust());
+            ps.setLong(5, row.escrowedDust());
+            ps.setInt(6, row.xpPaid());
+            ps.setLong(7, row.createdAt());
+            ps.setString(8, row.status().name());
+            ps.executeUpdate();
+            return generatedId(ps);
+        }
+    }
+
+    /**
+     * The offer with {@code id}, but only while it is {@code ACTIVE}. A filled or cancelled offer
+     * is invisible here -- this is the read the fill path uses, so an offer that has left
+     * {@code ACTIVE} can never be spent against.
+     *
+     * @param id the offer id
+     * @return the row if it exists and is {@code ACTIVE}, otherwise {@link Optional#empty()}
+     */
+    public Optional<CommodityOfferRow> findActiveOffer(long id) throws SQLException {
+        String sql = "SELECT * FROM commodity_offers WHERE id = ? AND status = 'ACTIVE'";
+        try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
+            ps.setLong(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(mapOffer(rs)) : Optional.empty();
+            }
+        }
+    }
+
+    /**
+     * The best resting bids for a material -- highest price first, and among equal prices the
+     * oldest first -- so a seller hitting the book fills against the keenest, longest-waiting bid.
+     *
+     * @param materialKey the material to read the book for
+     * @param limit       the maximum number of bids to return
+     * @return the active bids, best-priced then oldest first
+     */
+    public List<CommodityOfferRow> bestActiveBids(String materialKey, int limit) throws SQLException {
+        String sql = "SELECT * FROM commodity_offers WHERE material_key = ? AND status = 'ACTIVE'"
+                + " ORDER BY price_each_dust DESC, created_at ASC, id ASC LIMIT ?";
+        try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
+            ps.setString(1, materialKey);
+            ps.setInt(2, limit);
+            return queryOffers(ps);
+        }
+    }
+
+    /** Decrements an ACTIVE offer; flips it to FILLED when its remaining quantity reaches zero. */
+    public int spendFromOffer(long id, int qtyFilled, long escrowSpentDust) throws SQLException {
+        String sql = "UPDATE commodity_offers SET"
+                + " qty_remaining = qty_remaining - ?,"
+                + " escrowed_dust = escrowed_dust - ?,"
+                + " status = CASE WHEN qty_remaining - ? = 0 THEN 'FILLED' ELSE status END"
+                + " WHERE id = ? AND status = 'ACTIVE'";
+        try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
+            ps.setInt(1, qtyFilled);
+            ps.setLong(2, escrowSpentDust);
+            ps.setInt(3, qtyFilled);
+            ps.setLong(4, id);
+            return ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Transitions an {@code ACTIVE} offer to {@code CANCELLED} and returns how many rows changed.
+     * Only an {@code ACTIVE} offer is affected, so a caller can treat {@code 1} as "I cancelled
+     * this" and {@code 0} as "it had already left ACTIVE".
+     *
+     * @param id the offer to cancel
+     * @return the number of rows updated: {@code 1} if the offer was {@code ACTIVE}, else {@code 0}
+     * @throws SQLException if the write fails
+     */
+    public int cancelOffer(long id) throws SQLException {
+        String sql = "UPDATE commodity_offers SET status = 'CANCELLED' WHERE id = ? AND status = 'ACTIVE'";
+        try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
+            ps.setLong(1, id);
+            return ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A buyer's offers in one status, newest first.
+     *
+     * @param buyer  the buyer to read
+     * @param status the single status to return
+     * @return the matching offers, newest {@code created_at} first
+     */
+    public List<CommodityOfferRow> offersByBuyer(UUID buyer, OfferStatus status) throws SQLException {
+        String sql = "SELECT * FROM commodity_offers WHERE buyer_uuid = ? AND status = ? ORDER BY created_at DESC";
+        try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
+            ps.setString(1, buyer.toString());
+            ps.setString(2, status.name());
+            return queryOffers(ps);
+        }
+    }
+
+    /**
+     * How many units of {@code materialKey} {@code buyer} has already bought since
+     * {@code sinceEpochMs}, summed from the {@code trades} log, for the rolling buy-limit gate.
+     *
+     * @param buyer        the buyer to sum purchases for
+     * @param materialKey  the material to sum
+     * @param sinceEpochMs the window start; only trades with {@code happened_at >= sinceEpochMs} count
+     * @return the total amount bought in the window, or {@code 0} if none
+     * @throws SQLException if the read fails
+     */
+    public int buyLimitUsage(UUID buyer, String materialKey, long sinceEpochMs) throws SQLException {
+        String sql = "SELECT COALESCE(SUM(amount), 0) FROM trades"
+                + " WHERE buyer_uuid = ? AND material_key = ? AND happened_at >= ?";
+        try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
+            ps.setString(1, buyer.toString());
+            ps.setString(2, materialKey);
+            ps.setLong(3, sinceEpochMs);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        }
+    }
+
+    /**
+     * The highest price any {@code ACTIVE} bid is offering for {@code materialKey}, or
+     * {@link Optional#empty()} if the book holds no resting bid for it.
+     *
+     * @param materialKey the material to read the best bid for
+     * @return the best bid price in dust, or empty when the book is empty for this material
+     * @throws SQLException if the read fails
+     */
+    public Optional<Long> bestBidPriceDust(String materialKey) throws SQLException {
+        String sql = "SELECT MAX(price_each_dust) FROM commodity_offers"
+                + " WHERE material_key = ? AND status = 'ACTIVE'";
+        try (PreparedStatement ps = database.connection().prepareStatement(sql)) {
+            ps.setString(1, materialKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    long v = rs.getLong(1);
+                    return rs.wasNull() ? Optional.empty() : Optional.of(v);
+                }
+                return Optional.empty();
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ trades
 
     /**
@@ -392,6 +552,29 @@ public final class MarketDao {
                 ListingStatus.fromStored(rs.getString("status")),
                 nullableLong(rs, "sold_at"),
                 buyer == null ? null : UUID.fromString(buyer));
+    }
+
+    private static List<CommodityOfferRow> queryOffers(PreparedStatement ps) throws SQLException {
+        try (ResultSet rs = ps.executeQuery()) {
+            List<CommodityOfferRow> rows = new ArrayList<>();
+            while (rs.next()) {
+                rows.add(mapOffer(rs));
+            }
+            return rows;
+        }
+    }
+
+    private static CommodityOfferRow mapOffer(ResultSet rs) throws SQLException {
+        return new CommodityOfferRow(
+                rs.getLong("id"),
+                UUID.fromString(rs.getString("buyer_uuid")),
+                rs.getString("material_key"),
+                rs.getInt("qty_remaining"),
+                rs.getLong("price_each_dust"),
+                rs.getLong("escrowed_dust"),
+                rs.getInt("xp_paid"),
+                rs.getLong("created_at"),
+                OfferStatus.fromStored(rs.getString("status")));
     }
 
     private static PendingItemRow mapPending(ResultSet rs) throws SQLException {

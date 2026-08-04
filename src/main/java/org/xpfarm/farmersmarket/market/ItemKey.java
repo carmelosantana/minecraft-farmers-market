@@ -38,6 +38,16 @@ public final class ItemKey {
     }
 
     /**
+     * The commodity-item key for {@code itemBytes}: {@code "c:"} followed by the SHA-256 hex digest.
+     *
+     * @param itemBytes the serialized item stack
+     * @return the prefixed content-hash key
+     */
+    public static String forCommodity(byte[] itemBytes) {
+        return "c:" + sha256Hex(itemBytes);
+    }
+
+    /**
      * The lower-case hex SHA-256 digest of {@code bytes}.
      *
      * @param bytes the input to hash

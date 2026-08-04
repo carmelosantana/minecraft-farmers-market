@@ -17,6 +17,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -109,12 +110,41 @@ class MigrationsTest {
     }
 
     @Test
-    void migratesToVersionTwoWithTheMarketTables(@TempDir Path dir) throws Exception {
+    void migratesToVersionThreeWithAllTables(@TempDir Path dir) throws Exception {
         try (Database db = Database.open(dir.resolve("m.db"), dir.resolve("tmp").toString(), 5000)) {
-            assertEquals(2, Migrations.applyTo(db.connection()));
+            assertEquals(3, Migrations.applyTo(db.connection()));
             assertTrue(tableExists(db.connection(), "listings"));
             assertTrue(tableExists(db.connection(), "trades"));
             assertTrue(tableExists(db.connection(), "pending_items"));
+        }
+    }
+
+    @Test
+    void migration3CreatesCommodityOffersAndReachesVersion3() throws Exception {
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite::memory:")) {
+            int version = Migrations.applyTo(c);
+            assertEquals(3, version, "newest schema version");
+            // commodity_offers exists and accepts a valid row
+            try (var st = c.createStatement()) {
+                st.execute("INSERT INTO commodity_offers"
+                        + "(buyer_uuid, material_key, qty_remaining, price_each_dust, escrowed_dust, xp_paid, created_at)"
+                        + " VALUES ('u', 'minecraft:iron_ingot', 64, 3000, 192000, 2, 100)");
+            }
+        }
+    }
+
+    @Test
+    void migration3RejectsNegativeQtyAndNonPositivePrice() throws Exception {
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite::memory:")) {
+            Migrations.applyTo(c);
+            try (var st = c.createStatement()) {
+                assertThrows(SQLException.class, () -> st.execute("INSERT INTO commodity_offers"
+                        + "(buyer_uuid, material_key, qty_remaining, price_each_dust, escrowed_dust, xp_paid, created_at)"
+                        + " VALUES ('u','k', -1, 3000, 0, 0, 1)"), "qty_remaining >= 0 CHECK");
+                assertThrows(SQLException.class, () -> st.execute("INSERT INTO commodity_offers"
+                        + "(buyer_uuid, material_key, qty_remaining, price_each_dust, escrowed_dust, xp_paid, created_at)"
+                        + " VALUES ('u','k', 1, 0, 0, 0, 1)"), "price_each_dust > 0 CHECK");
+            }
         }
     }
 
@@ -204,7 +234,7 @@ class MigrationsTest {
             assertTrue(real.getAutoCommit(), "autocommit must be restored however this fails");
             // And the connection is left usable, not wedged mid-transaction: the recovery run
             // applies every migration this build knows, so it reaches the current schema version.
-            assertEquals(2, Migrations.applyTo(real));
+            assertEquals(3, Migrations.applyTo(real));
             assertTrue(tableExists(real, "account_links"));
         }
     }

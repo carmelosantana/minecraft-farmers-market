@@ -55,8 +55,8 @@ public final class MarketException extends RuntimeException {
         /** The seller is already at the maximum number of active listings. */
         TOO_MANY_LISTINGS,
 
-        /** A commodity listing was attempted before the commodity market is open. */
-        COMMODITY_NOT_YET,
+        /** A bid or sell names a material that is not a fungible commodity. */
+        NOT_A_COMMODITY,
 
         /**
          * Storage failed, and the failure provably happened <b>before any write was attempted</b> --

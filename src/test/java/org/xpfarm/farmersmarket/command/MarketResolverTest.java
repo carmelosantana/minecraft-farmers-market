@@ -409,11 +409,11 @@ final class MarketResolverTest {
         void onlySubcommandsTheSenderMayRunAreOffered() {
             assertEquals(
                     List.of("balance", "deposit", "withdraw", "sell", "browse", "info", "buy",
-                            "cancel", "mine", "claim", "pot"),
+                            "cancel", "mine", "claim", "pot", "bid", "price", "cancelbid"),
                     MarketResolver.complete(new String[] {""}, PLAYER, ORDINARY_PLAYER));
             assertEquals(
                     List.of("balance", "deposit", "withdraw", "sell", "browse", "info", "buy",
-                            "cancel", "mine", "claim", "pot", "reload"),
+                            "cancel", "mine", "claim", "pot", "bid", "price", "cancelbid", "reload"),
                     MarketResolver.complete(new String[] {""}, PLAYER, ADMIN));
             assertEquals(List.of(),
                     MarketResolver.complete(new String[] {""}, PLAYER, NOBODY));
@@ -422,7 +422,7 @@ final class MarketResolverTest {
         @Test
         void theConsoleIsOfferedOnlyWhatItCanActuallyRun() {
             // Only the read-only views and reload run without an inventory to act on.
-            assertEquals(List.of("browse", "info", "pot", "reload"),
+            assertEquals(List.of("browse", "info", "pot", "price", "reload"),
                     MarketResolver.complete(new String[] {""}, CONSOLE, ADMIN));
         }
 
@@ -493,8 +493,71 @@ final class MarketResolverTest {
                 assertNotNull(MarketResolver.messageFor(reason));
                 assertFalse(MarketResolver.messageFor(reason).isBlank());
             }
-            assertTrue(MarketResolver.messageFor(MarketException.Reason.COMMODITY_NOT_YET)
-                    .toLowerCase(Locale.ROOT).contains("unique"));
+            assertTrue(MarketResolver.messageFor(MarketException.Reason.NOT_A_COMMODITY)
+                    .toLowerCase(Locale.ROOT).contains("commodity"));
+        }
+    }
+
+    @Nested
+    final class Commodities {
+
+        @Test
+        void resolvesBidWithMaterialQuantityAndPrice() {
+            Resolution r = resolvePlayer("bid", "iron_ingot", "64", "3");
+            assertEquals(Outcome.BID, r.outcome());
+            assertEquals("iron_ingot", r.material());
+            assertEquals(64, r.quantity());
+            assertEquals(3000L, r.priceDust(), "3 diamonds -> 3000 dust");
+        }
+
+        @Test
+        void bidMissingPieces() {
+            assertEquals(Outcome.MISSING_MATERIAL, resolvePlayer("bid").outcome());
+            assertEquals(Outcome.MISSING_AMOUNT, resolvePlayer("bid", "iron_ingot").outcome());
+            assertEquals(Outcome.MISSING_PRICE, resolvePlayer("bid", "iron_ingot", "64").outcome());
+            assertEquals(Outcome.BAD_AMOUNT, resolvePlayer("bid", "iron_ingot", "-1", "3").outcome());
+            assertEquals(Outcome.BAD_PRICE, resolvePlayer("bid", "iron_ingot", "64", "0").outcome());
+        }
+
+        @Test
+        void resolvesPriceView() {
+            Resolution r = resolvePlayer("price", "iron_ingot");
+            assertEquals(Outcome.PRICE, r.outcome());
+            assertEquals("iron_ingot", r.material());
+        }
+
+        @Test
+        void resolvesCancelBidById() {
+            Resolution r = resolvePlayer("cancelbid", "7");
+            assertEquals(Outcome.CANCELBID, r.outcome());
+            assertEquals(7L, r.listingId());
+        }
+
+        @Test
+        void sellCarriesBothPriceAndQuantity() {
+            Resolution r = resolvePlayer("sell", "5");
+            assertEquals(Outcome.SELL, r.outcome());
+            assertEquals(5000L, r.priceDust(), "unique interpretation: 5 diamonds");
+            assertEquals(5, r.quantity(), "commodity interpretation: 5 units");
+        }
+
+        @Test
+        void sellFractionalHasZeroQuantity() {
+            Resolution r = resolvePlayer("sell", "0.5");
+            assertEquals(500L, r.priceDust(), "0.5 diamonds -> 500 dust (unique interpretation)");
+            assertEquals(0, r.quantity(), "0.5 is not a whole quantity");
+        }
+
+        @Test
+        void commodityWriteVerbsNeedAPlayerButPriceDoesNot() {
+            // The console/needsPlayer gate must be real for the new subcommands: bid and cancelbid
+            // move items and money, so the console cannot run them; price is a read-only view.
+            assertEquals(Outcome.CONSOLE_NEEDS_PLAYER,
+                    resolveConsole("bid", "iron_ingot", "64", "1").outcome());
+            assertEquals(Outcome.CONSOLE_NEEDS_PLAYER,
+                    resolveConsole("cancelbid", "7").outcome());
+            assertNotEquals(Outcome.CONSOLE_NEEDS_PLAYER,
+                    resolveConsole("price", "iron_ingot").outcome());
         }
     }
 }

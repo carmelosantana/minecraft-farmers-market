@@ -99,6 +99,7 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
     public void onEnable() {
         saveDefaultConfig();
         config.set(loadConfig(this::warn));
+        validateItemKeys(config.get());
 
         Path databaseFile = getDataFolder().toPath().resolve(DATABASE_FILE);
 
@@ -244,6 +245,7 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
             warnings.add(warning);
             getLogger().warning(warning);
         }));
+        validateItemKeys(config.get());
         return List.copyOf(warnings);
     }
 
@@ -298,6 +300,37 @@ public final class FarmersMarketPlugin extends JavaPlugin implements Listener {
 
     private FmConfig loadConfig(java.util.function.Consumer<String> warn) {
         return FmConfig.load(new BukkitConfigSource(getConfig(), warn), warn);
+    }
+
+    /**
+     * Warns about any {@code buyback-floors} or {@code buy-limits} key that is not a resolvable
+     * Bukkit {@link org.bukkit.Material} name.
+     *
+     * <p>Both maps are keyed by the exact uppercase {@code Material.name()} (e.g. {@code IRON_INGOT}),
+     * and both are looked up by that exact string with no normalization. A mis-cased or mis-typed key
+     * therefore never matches: a stray floor key silently applies no floor (fails closed, safe), but a
+     * stray buy-limit key silently leaves that item's purchase cap UNENFORCED (fails open, an
+     * anti-abuse control quietly disabled). This validation makes both loud at enable and reload.
+     *
+     * <p>It lives here rather than in {@link FmConfig} because {@code FmConfig} is Bukkit-free by
+     * constraint and cannot call {@link org.bukkit.Material#matchMaterial}, which needs a live server.
+     * The lookup convention itself is deliberately unchanged -- keys stay {@code Material.name()}.
+     */
+    private void validateItemKeys(FmConfig cfg) {
+        for (String key : cfg.buybackFloors().keySet()) {
+            if (org.bukkit.Material.matchMaterial(key) == null) {
+                getLogger().warning("FarmersMarket config: liquidity.buyback-floors key '" + key
+                        + "' is not a valid Material name (expected uppercase, e.g. IRON_INGOT); "
+                        + "this entry will never match and no floor will apply to it.");
+            }
+        }
+        for (String key : cfg.buyLimits().keySet()) {
+            if (org.bukkit.Material.matchMaterial(key) == null) {
+                getLogger().warning("FarmersMarket config: limits.buy-limits key '" + key
+                        + "' is not a valid Material name (expected uppercase, e.g. IRON_INGOT); "
+                        + "this entry will never match, so that item's buy limit will NOT be enforced.");
+            }
+        }
     }
 
     /**

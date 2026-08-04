@@ -171,7 +171,8 @@ final class PluginDescriptorTest {
         assertNotNull(market, "the market command must be declared");
 
         assertEquals("/market [balance | deposit | withdraw | sell | browse | info | buy | "
-                + "cancel | mine | claim | pot | reload]", market.get("usage"));
+                + "cancel | mine | claim | pot | bid | price | cancelbid | reload]",
+                market.get("usage"));
     }
 
     @Test

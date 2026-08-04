@@ -12,6 +12,7 @@ package org.xpfarm.farmersmarket.market;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Material;
@@ -91,6 +92,54 @@ public final class BukkitItemCodec {
      */
     public static ItemStack decode(byte[] bytes) {
         return ItemStack.deserializeBytes(bytes);
+    }
+
+    /**
+     * Resolves a typed material name (e.g. "iron_ingot", "minecraft:iron_ingot", "IRON_INGOT") to the
+     * canonical commodity spec, or empty when the name matches no material or the material is not a
+     * fungible commodity. This is the only place a raw player-typed material string becomes a
+     * {@code Material}; the market package never sees Bukkit types.
+     *
+     * @param materialName the player-typed material name
+     * @return the canonical spec, or empty if unknown or not a commodity
+     */
+    public static Optional<CommoditySpec> commoditySpecFor(String materialName) {
+        Material material = Material.matchMaterial(materialName);
+        if (material == null || !material.isItem()) {
+            return Optional.empty();
+        }
+        ItemStack one = new ItemStack(material, 1);
+        if (ItemClass.classify(material.getMaxStackSize(), hasMeaningfulComponents(one)) != ItemClass.COMMODITY) {
+            return Optional.empty();
+        }
+        return Optional.of(specOf(material, one));
+    }
+
+    /**
+     * The canonical spec for a held commodity stack (its amount is ignored -- the spec is per-unit).
+     *
+     * @param held the held stack the seller is offering
+     * @return the canonical spec for it
+     * @throws MarketException {@code NOT_A_COMMODITY} if {@code held} is not a fungible commodity
+     */
+    public static CommoditySpec commodityOf(ItemStack held) {
+        Material material = held.getType();
+        if (ItemClass.classify(material.getMaxStackSize(), hasMeaningfulComponents(held)) != ItemClass.COMMODITY) {
+            throw new MarketException(MarketException.Reason.NOT_A_COMMODITY,
+                    material.getKey() + " is not a fungible commodity");
+        }
+        return specOf(material, new ItemStack(material, 1));
+    }
+
+    /**
+     * Builds the canonical spec for {@code material} from the serialized bytes of exactly one plain
+     * item. The item key uses the commodity key path ({@code "c:"}) so it can never collide with a
+     * unique item's key.
+     */
+    private static CommoditySpec specOf(Material material, ItemStack one) {
+        byte[] bytes = one.serializeAsBytes();
+        return new CommoditySpec(material.getKey().toString(), ItemKey.forCommodity(bytes), bytes,
+                words(material));
     }
 
     /**

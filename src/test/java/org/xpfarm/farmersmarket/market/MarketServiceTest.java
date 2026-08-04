@@ -215,6 +215,184 @@ class MarketServiceTest {
         assertEquals(1, service.pendingFor(SELLER).get().size(), "the seller is owed the expired item");
     }
 
+    // ------------------------------------------------------- commodity: place bid
+
+    @Test
+    void placeBidEscrowsDiamondsFromBuyer() throws Exception {
+        UUID buyer = UUID.randomUUID();
+        seedBalance(buyer, 100_000L); // 100 diamonds
+        long id = service.placeBid(buyer, "minecraft:iron_ingot", 10, Diamonds.ofDust(3000L), 2, 1L)
+                .get();
+        assertEquals(70_000L, accounts.balanceDust(buyer), "10 x 3000 dust escrowed out of balance");
+        CommodityOfferRow bid = market.findActiveOffer(id).orElseThrow();
+        assertEquals(30_000L, bid.escrowedDust());
+    }
+
+    @Test
+    void placeBidRefusesWhenBalanceTooLow() throws Exception {
+        UUID buyer = UUID.randomUUID();
+        seedBalance(buyer, 10_000L);
+        ExecutionException ex = assertThrows(ExecutionException.class,
+                () -> service.placeBid(buyer, "k", 10, Diamonds.ofDust(3000L), 0, 1L).get());
+        assertEquals(MarketException.Reason.INSUFFICIENT_FUNDS,
+                ((MarketException) ex.getCause()).reason());
+    }
+
+    // ------------------------------------------------------- commodity: market-sell
+
+    @Test
+    void marketSellFillsBestBidFirstThenFloorAndConservesSupply() throws Exception {
+        UUID seller = UUID.randomUUID();
+        UUID low = UUID.randomUUID();
+        UUID high = UUID.randomUUID();
+        seedBalance(low, 1_000_000L);
+        seedBalance(high, 1_000_000L);
+        seedBalance(SystemAccounts.COMMUNITY_POT, 1_000_000L);
+        long supplyBefore = totalSupply(); // sum of all account balances + active-offer escrow
+
+        service.placeBid(low, "minecraft:iron_ingot", 10, Diamonds.ofDust(2000L), 0, 1L).get();
+        service.placeBid(high, "minecraft:iron_ingot", 5, Diamonds.ofDust(5000L), 0, 2L).get();
+
+        CommoditySpec spec = ironSpec(); // fixed CommoditySpec for iron_ingot
+        // Sell 20: 5 to `high` @5000, 10 to `low` @2000, 5 remainder to floor @1000.
+        CommoditySaleResult result = service.marketSell(seller, spec, 20,
+                /*tax*/7.0, /*burnShare*/0.5, /*floorDust*/1000L,
+                /*buyLimitEnabled*/false, /*cap*/-1, /*window*/0L, 100L).get();
+
+        assertEquals(20, result.sold());
+        assertEquals(0, result.unsold());
+        assertEquals(supplyBefore - burnedAcrossTrades(), totalSupply(),
+                "supply falls by exactly the burned tax; floor sales burn nothing");
+        // both bids fully filled
+        assertTrue(market.findActiveOffer(highBidId()).isEmpty());
+    }
+
+    @Test
+    void marketSellStopsAtPotCapacityAndReturnsRemainder() throws Exception {
+        UUID seller = UUID.randomUUID();
+        seedBalance(SystemAccounts.COMMUNITY_POT, 3000L); // affords 3 at floor 1000
+        CommoditySaleResult result = service.marketSell(seller, ironSpec(), 10,
+                7.0, 0.5, 1000L, false, -1, 0L, 100L).get();
+        assertEquals(3, result.sold(), "no bids; pot affords only 3");
+        assertEquals(7, result.unsold());
+    }
+
+    @Test
+    void marketSellSkipsSellersOwnBid() throws Exception {
+        UUID seller = UUID.randomUUID();
+        seedBalance(seller, 1_000_000L);
+        service.placeBid(seller, "minecraft:iron_ingot", 10, Diamonds.ofDust(9000L), 0, 1L).get();
+        // no other bids, no floor
+        CommoditySaleResult result = service.marketSell(seller, ironSpec(), 10,
+                7.0, 0.5, /*no floor*/0L, false, -1, 0L, 100L).get();
+        assertEquals(0, result.sold(), "a seller cannot fill their own bid");
+        assertEquals(10, result.unsold());
+    }
+
+    @Test
+    void marketSellHonoursBuyLimitThenCancelsRemainderOfBid() throws Exception {
+        UUID seller = UUID.randomUUID();
+        UUID buyer = UUID.randomUUID();
+        seedBalance(buyer, 1_000_000L);
+        long bidId = service.placeBid(buyer, "minecraft:iron_ingot", 100, Diamonds.ofDust(1000L), 0, 1L).get();
+        // cap 30, empty window: fill 30, then cancel the remaining 70 and refund its escrow.
+        long buyerBalAfterBid = accounts.balanceDust(buyer); // 1_000_000 - 100_000 = 900_000
+        CommoditySaleResult result = service.marketSell(seller, ironSpec(), 100,
+                7.0, 0.5, 0L, /*buyLimitEnabled*/true, /*cap*/30, /*window*/3_600_000L, 1_000_000L).get();
+        assertEquals(30, result.sold(), "capped at 30");
+        assertEquals(70, result.unsold(), "the other 70 could not be bought by the only bidder");
+        assertTrue(market.findActiveOffer(bidId).isEmpty(), "bid remainder cancelled");
+        // refund: escrow held 100_000; 30 spent (30_000); 70_000 returned to buyer.
+        assertEquals(buyerBalAfterBid + 70_000L, accounts.balanceDust(buyer));
+    }
+
+    @Test
+    void buyLimitSeesUncommittedFirstFillWhenCappingSameBuyersSecondBid() throws Exception {
+        // One buyer, two resting bids on the same material. Within ONE marketSell transaction the
+        // buy-limit read must see the FIRST fill's uncommitted trade when it evaluates the second
+        // bid (SQLite read-your-own-writes on one connection), or the cap leaks across bids.
+        UUID seller = UUID.randomUUID();
+        UUID buyer = UUID.randomUUID();
+        seedBalance(seller, 1_000_000L);
+        seedBalance(buyer, 1_000_000L);
+        // Same price, distinct created_at so the book order is deterministic: bid1 (older) first.
+        long bid1 = service.placeBid(buyer, "minecraft:iron_ingot", 20, Diamonds.ofDust(2000L), 0, 1L).get();
+        long bid2 = service.placeBid(buyer, "minecraft:iron_ingot", 20, Diamonds.ofDust(2000L), 0, 2L).get();
+        long buyerBalAfterBids = accounts.balanceDust(buyer); // 1_000_000 - 2*40_000 = 920_000
+        long supplyBefore = totalSupply();
+
+        // Sell 40 into a cap of 30 with an empty window: bid1 fills to 20, then the buy-limit --
+        // seeing bid1's uncommitted 20 -- allows only 10 more on bid2, which is then cancelled and
+        // its remaining escrow refunded. 10 units go unsold (no floor).
+        CommoditySaleResult result = service.marketSell(seller, ironSpec(), 40,
+                7.0, 0.5, /*floorDust*/0L,
+                /*buyLimitEnabled*/true, /*cap*/30, /*window*/3_600_000L, 1_000_000L).get();
+
+        assertEquals(30, result.sold(), "the cap is respected across BOTH bids, not per bid");
+        assertEquals(10, result.unsold(), "the 10 over-cap units could not be bought");
+        assertTrue(market.findActiveOffer(bid1).isEmpty(), "the first bid filled fully (now FILLED)");
+        assertTrue(market.findActiveOffer(bid2).isEmpty(), "the over-cap second bid was cancelled");
+        // bid2 escrowed 40_000; 10 units (20_000) were spent, so 20_000 is refunded.
+        assertEquals(buyerBalAfterBids + 20_000L, accounts.balanceDust(buyer),
+                "the over-cap bid's unspent escrow is refunded to the buyer");
+        assertEquals(supplyBefore - burnedAcrossTrades(), totalSupply(),
+                "supply falls by exactly the burned tax across both fills");
+    }
+
+    @Test
+    void bidPartiallyFilledThenCancelledConservesSupply() throws Exception {
+        // A bid is partially filled by a small sell, then the buyer cancels the remainder. The
+        // headline invariant across the whole sequence: supply falls only by the burned tax.
+        UUID seller = UUID.randomUUID();
+        UUID buyer = UUID.randomUUID();
+        seedBalance(buyer, 100_000L);
+        long supplyBefore = totalSupply();
+        long bidId = service.placeBid(buyer, "minecraft:iron_ingot", 10, Diamonds.ofDust(2000L), 3, 1L).get();
+        long buyerBalAfterBid = accounts.balanceDust(buyer); // 100_000 - 10*2000 = 80_000
+
+        // Partial fill: sell only 4 of the 10 wanted, no floor, no buy limit.
+        CommoditySaleResult result = service.marketSell(seller, ironSpec(), 4,
+                7.0, 0.5, /*floorDust*/0L, /*buyLimitEnabled*/false, /*cap*/-1, /*window*/0L, 100L).get();
+        assertEquals(4, result.sold());
+        assertEquals(0, result.unsold(), "the seller offered only 4 and all 4 were absorbed");
+
+        // After the partial fill the offer is still ACTIVE with reduced qty and escrow.
+        CommodityOfferRow afterFill = market.findActiveOffer(bidId).orElseThrow();
+        assertEquals(6, afterFill.qtyRemaining(), "4 of 10 filled, 6 remain");
+        assertEquals(12_000L, afterFill.escrowedDust(), "escrow fell by 4 x 2000 = 8000, 12000 remains");
+
+        // Buyer cancels the remainder: the unfilled 12_000 escrow comes back, the offer is gone.
+        service.cancelBid(buyer, bidId, 200L).get();
+        assertTrue(market.findActiveOffer(bidId).isEmpty(), "the cancelled bid is no longer active");
+        assertEquals(buyerBalAfterBid + 12_000L, accounts.balanceDust(buyer),
+                "the buyer gets back exactly the unfilled escrow");
+        assertEquals(supplyBefore - burnedAcrossTrades(), totalSupply(),
+                "across partial-fill-then-cancel, supply falls only by the burned tax");
+    }
+
+    // ------------------------------------------------------- commodity: cancel bid
+
+    @Test
+    void cancelBidRefundsRemainingEscrowNotXp() throws Exception {
+        UUID buyer = UUID.randomUUID();
+        seedBalance(buyer, 100_000L);
+        long id = service.placeBid(buyer, "k", 10, Diamonds.ofDust(3000L), 5, 1L).get();
+        service.cancelBid(buyer, id, 2L).get();
+        assertEquals(100_000L, accounts.balanceDust(buyer), "full escrow refunded (nothing filled)");
+        assertTrue(market.findActiveOffer(id).isEmpty());
+    }
+
+    @Test
+    void cancelBidRefusesForeignOffer() throws Exception {
+        UUID buyer = UUID.randomUUID();
+        UUID other = UUID.randomUUID();
+        seedBalance(buyer, 100_000L);
+        long id = service.placeBid(buyer, "k", 1, Diamonds.ofDust(1000L), 0, 1L).get();
+        ExecutionException ex = assertThrows(ExecutionException.class,
+                () -> service.cancelBid(other, id, 2L).get());
+        assertEquals(MarketException.Reason.NOT_YOUR_LISTING, ((MarketException) ex.getCause()).reason());
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static ListedItem uniqueItem() {
@@ -244,5 +422,66 @@ class MarketServiceTest {
                 return rs.getInt(1);
             }
         }).get();
+    }
+
+    /** Writes a balance in dust straight through the DAO, on the executor's thread. */
+    private void seedBalance(UUID uuid, long dust) throws Exception {
+        executor.submit(() -> {
+            accounts.upsertBalance(uuid, dust);
+            return null;
+        }).get();
+    }
+
+    /**
+     * Every diamond that still exists: the sum of all account balances plus the dust escrowed
+     * against still-{@code ACTIVE} offers. Money moved into escrow has not left the world, so it
+     * must count, or a bid would look like a burn.
+     */
+    private long totalSupply() throws Exception {
+        return executor.submit(() -> {
+            long sum;
+            try (var ps = database.connection()
+                    .prepareStatement("SELECT COALESCE(SUM(diamonds_dust), 0) FROM accounts");
+                    var rs = ps.executeQuery()) {
+                rs.next();
+                sum = rs.getLong(1);
+            }
+            try (var ps = database.connection().prepareStatement(
+                    "SELECT COALESCE(SUM(escrowed_dust), 0) FROM commodity_offers WHERE status = 'ACTIVE'");
+                    var rs = ps.executeQuery()) {
+                rs.next();
+                sum += rs.getLong(1);
+            }
+            return sum;
+        }).get();
+    }
+
+    /** The total tax burned across every logged trade, the only diamonds that left the world. */
+    private long burnedAcrossTrades() throws Exception {
+        return executor.submit(() -> {
+            try (var ps = database.connection()
+                    .prepareStatement("SELECT COALESCE(SUM(tax_burned_dust), 0) FROM trades");
+                    var rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }).get();
+    }
+
+    /** The id of the highest-priced offer in the book, whatever status it now holds. */
+    private long highBidId() throws Exception {
+        return executor.submit(() -> {
+            try (var ps = database.connection().prepareStatement(
+                    "SELECT id FROM commodity_offers ORDER BY price_each_dust DESC, id ASC LIMIT 1");
+                    var rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }).get();
+    }
+
+    /** A fixed, Bukkit-free {@link CommoditySpec} for iron ingots. */
+    private static CommoditySpec ironSpec() {
+        return new CommoditySpec("minecraft:iron_ingot", "ironkey", new byte[] {1}, "Iron Ingot");
     }
 }
